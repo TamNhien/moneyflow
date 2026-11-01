@@ -167,3 +167,29 @@ def test_mismatched_password_confirmation(client):
     for schema, payload in invalid_cases:
         with pytest.raises(ValidationError):
             schema.model_validate({key:value for key,value in payload.items() if key!='confirm_password'})
+
+
+def test_brand_assets_and_https_local_link(client, monkeypatch):
+    from backend import app as app_module
+    assert 'logo.svg' in client.get('/').text
+    for name in ('logo.svg', 'favicon.svg'):
+        r=client.get('/'+name)
+        assert r.status_code==200
+        assert b'<svg' in r.content and b'linearGradient' in r.content
+    icon=client.get('/apple-touch-icon.png')
+    assert icon.status_code==200 and icon.content[:8] == b'\x89PNG\r\n\x1a\n'
+    monkeypatch.setenv('APP_BASE_URL', 'https://127.0.0.1:8765')
+    from email.message import EmailMessage
+    from unittest.mock import MagicMock
+    class FakeSMTP:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def ehlo(self): pass
+        def starttls(self, **kwargs): pass
+        def login(self, *args): pass
+        def send_message(self, message):
+            assert 'https://127.0.0.1:8765/reset?token=sample' in message.get_content()
+    monkeypatch.setenv('SMTP_HOST','localhost')
+    monkeypatch.setenv('SMTP_FROM','moneyflow@example.com')
+    monkeypatch.setattr(app_module.smtplib, 'SMTP',lambda *args,**kwargs:FakeSMTP())
+    app_module.send_reset_email('user@example.com','sample')

@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.4
+# MoneyFlow Local v1.0.6
 
-Ứng dụng quản lý chi tiêu cá nhân có nhiều người dùng, giao diện tiếng Việt, chạy tại **http://127.0.0.1:8765**, dữ liệu trong **PostgreSQL**. Phần giao diện dùng HTML/CSS/JavaScript thuần, không cần CDN; chức năng thu chi hoạt động offline, còn gửi email khôi phục cần Internet và cấu hình SMTP. API dùng Python/FastAPI và SQLAlchemy.
+Ứng dụng quản lý chi tiêu cá nhân có nhiều người dùng, giao diện tiếng Việt, chạy tại **https://127.0.0.1:8765**, dữ liệu trong **PostgreSQL**. Phần giao diện dùng HTML/CSS/JavaScript thuần, không cần CDN; chức năng thu chi hoạt động offline, còn gửi email khôi phục cần Internet và cấu hình SMTP. API dùng Python/FastAPI và SQLAlchemy.
 
 ## Yêu cầu
 
@@ -16,13 +16,13 @@
 4. Chạy:
 
 ```powershell
-Get-ChildItem .\scripts -Filter *.ps1 | Unblock-File
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
 .\scripts\start.ps1
 ```
 
 Với cấu hình **local theo yêu cầu**, lần đầu `start.ps1` tạo `.env` với `DB_PASSWORD=moneyflow` rồi khởi chạy database + server. Lần đầu mở web, điền **tên đăng nhập, email, số điện thoại, địa chỉ và mật khẩu mạnh** để tạo tài khoản Admin đầu tiên. **Không có mật khẩu Admin mặc định.**
 
-Truy cập: **http://127.0.0.1:8765**
+Truy cập: **https://127.0.0.1:8765**
 
 **Kết nối pgAdmin 4 (cài trên Windows):** Host `127.0.0.1`, Port `5435`, Database `moneyflow`, Username `moneyflow`, Password `moneyflow`. PostgreSQL bên trong Docker vẫn nghe ở `db:5432`; không chỉnh `DATABASE_URL` thành 5435. Đây là mật khẩu kết nối DB, **không phải** mật khẩu tài khoản Admin Web.
 
@@ -123,7 +123,7 @@ Sau khi sửa `.env`, chạy:
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-docker compose up -d --build --force-recreate app
+docker compose up -d --build
 docker compose ps -a
 ```
 
@@ -134,7 +134,7 @@ Kết nối pgAdmin: host `127.0.0.1`, port `5435`, database/user `moneyflow`, p
 ## v1.0.4: Build, test, push GitHub, tao Release tu dong
 
 **Folder source tren Windows:** `D:\LienThongDH\DoAn\moneyflow`. **Docker data:** `D:\DockerData`.
-Port web `127.0.0.1:8765`; port PostgreSQL tren Windows `127.0.0.1:5435` (trong Docker `db:5432`).
+Port web `https://127.0.0.1:8765`; port PostgreSQL tren Windows `127.0.0.1:5435` (trong Docker `db:5432`).
 
 ### Cai dat mot lan
 
@@ -210,3 +210,64 @@ Chay SQL `scripts/sql/users-overview.sql` trong pgAdmin Query Tool (database `mo
 **Nguyen tac:** moi ban nang cap tang `VERSION` va bo sung muc ghi chu phien ban vao chinh file `README.md`; khong tao them `CHANGELOG.md` hay `UPGRADE-TO-*.md`.
 
 Neu nang cap tu v1.0.3 bang patch, chay `.\scripts\cleanup-docs.ps1` de xoa cac file CHANGELOG/UPGRADE cu sau khi README da duoc thay the. Script chi xoa bon file tai lieu cu duoc liet ke; khong dong vao `.env`, source hoac volume.
+
+
+### v1.0.5: Nền tối toàn bộ, biểu đồ từ tâm, logo và HTTPS localhost
+
+- Dashboard, điều hướng, bảng giao dịch, ngân sách, danh mục, cài đặt, biểu mẫu và cửa sổ thao tác được chuyển sang giao diện tối xanh đen đồng bộ với đăng nhập. Màu chữ, đường phân cách và biểu đồ được điều chỉnh để có độ tương phản tốt.
+- Phân bổ chi tiêu theo danh mục đổi từ *doughnut* sang **pie chart SVG**, các phần màu chạy **từ tâm ra mép**. Mỗi phần có tooltip giá trị VNĐ và tỷ trọng; tên danh mục hiển thị trong bảng chú giải bên cạnh.
+- Khi có hơn 6 danh mục chi tiêu, biểu đồ hiển thị 5 danh mục lớn nhất và nhóm **Danh mục khác** để bảng chú giải nhất quán với đồ thị. Không tạo phần dữ liệu giả khi chưa có giao dịch.
+- Không thay đổi schema PostgreSQL hoặc mật khẩu. Giữ cổng HTTPS `8765`, pgAdmin PostgreSQL `5435` và Docker data tại `D:\DockerData`.
+- Sau khi chép bản vá vào `D:\LienThongDH\DoAn\moneyflow`, chạy:
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\test.ps1
+docker compose up -d --build
+docker compose ps -a
+```
+
+- Mở lại `https://127.0.0.1:8765`, nhấn `Ctrl + Shift + R` nếu trình duyệt còn giao diện cũ. Với bản phát hành tiếp theo, chạy `./scripts/publish.ps1` từ PowerShell để tiếp tục GitHub Releases (tự tăng theo file `VERSION`).
+
+
+#### Logo MoneyFlow & HTTPS nội bộ (v1.0.5)
+
+- Logo vector tại `frontend/logo.svg`, favicon tại `frontend/favicon.svg`, icon cho điện thoại tại `frontend/apple-touch-icon.png`. Header, sidebar và màn hình đăng nhập cùng dùng logo mới.
+- **HTTPS loopback:** Caddy reverse proxy là dịch vụ `caddy` trong `docker-compose.yml`. Trình duyệt: **`https://127.0.0.1:8765`** hoặc **`https://localhost:8765`**. Cổng **`8765` giờ chỉ nhận TLS**, truy cập bằng `http://` trên cổng này sẽ thất bại. Cổng HTTP `8764` (chỉ loopback) được dùng để chuyển hướng đến HTTPS nếu muốn.
+- Service `app` chỉ lắng nghe nội bộ Docker `app:8000`, không mở cổng ra Windows. `COOKIE_SECURE=true` giúp cookie phiên chỉ được gửi qua HTTPS. SMTP dùng liên kết đặt lại mật khẩu `https://127.0.0.1:8765/reset?token=...`.
+- PostgreSQL tiếp tục dùng host `127.0.0.1:5435` và `db:5432` trong Docker; **không chạy `docker compose down -v`**. Các volume `moneyflow_db`, `caddy_data`, `caddy_config` được giữ lại khi khởi động lại container.
+- Caddy dùng `tls internal` và tự cấp chứng chỉ qua **CA nội bộ**, không phải chứng chỉ công khai của Let's Encrypt. Do đó máy Windows cần tin cậy CA này một lần. Thực hiện có xác nhận (KHÔNG tự cài root CA âm thầm):
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\test.ps1
+docker compose up -d --build
+.\scripts\trust-local-https.ps1
+# Nhap YES sau khi xem thong tin CA va ban tin tuong CA noi bo
+Start-Process 'https://127.0.0.1:8765'
+```
+
+- Nếu vẫn thấy cảnh báo chứng chỉ: kiểm tra `docker compose logs caddy`, mở lại trình duyệt, xác nhận đúng URL 127.0.0.1/localhost. Một số trình duyệt sử dụng certificate store riêng và cần nhập chứng chỉ root bằng giao diện trình duyệt. Không bỏ qua cảnh báo chứng chỉ trên trang thật và không dùng `curl -k` để kết luận HTTPS đáng tin cậy.
+- **Lưu ý bảo mật:** Một Root CA đã được tin cậy có thể phát hành chứng chỉ cho nhiều tên miền. Chỉ cài chứng chỉ từ Caddy do chính bạn khởi chạy, không chia sẻ khóa/volume `caddy_data`, và không đưa `.crt`/private keys vào GitHub. Chứng chỉ và khóa của CA được lưu trong Docker volume `caddy_data` nên giữ volume này để tránh phải tin cậy CA mới.
+- GitHub Actions kiểm tra file `Caddyfile` và `docker compose config` trước khi phát hành; `scripts/publish.ps1` và `scripts/package.ps1` đã đưa `Caddyfile` vào danh sách source cho phép. Với repo ở trạng thái `v1.0.4` được phát hành, chạy `./scripts/publish.ps1 -Version 1.0.5` (KHÔNG dùng lệnh tự tăng phiên bản nếu đã thay `VERSION` lên `1.0.5` nhưng chưa phát hành). Chỉ một `README.md` được duy trì.
+
+
+### v1.0.6: Khac phuc loi HTTPS ERR_SSL_PROTOCOL_ERROR khi truy cap bang IP
+
+- Sua Caddyfile: them `default_sni 127.0.0.1` trong global options. Trinh duyet truy cap HTTPS bang dia chi IP co the khong gui SNI; Caddy su dung dia chi IP mac dinh de chon certificate noi bo.
+- Giữ nguyên `tls internal`, Caddy CA, volume, database, Docker Compose, cong 8765 HTTPS va PostgreSQL 5435. **Khong xoa volume** va khong can cai lai chung chi khi CA khong doi.
+- Khi cap nhat **Caddyfile qua bind mount**, phai **restart** service `caddy` de nap cau hinh moi. Lenh `docker compose up -d --build` khong dam bao restart Caddy neu chi file bind-mount thay doi.
+- Cap nhat bang Patch v1.0.6 roi chay:
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker compose restart caddy
+docker compose ps -a
+curl.exe -v https://127.0.0.1:8765/
+```
+
+- Neu `curl.exe` van bao SSL protocol error, thu `curl.exe -vk https://localhost:8765/` va `docker compose logs --tail=100 caddy`; `-k` **chi dung chan doan** (bo qua kiem tra CA), khong dung de xac nhan do tin cay HTTPS. Neu `localhost` hoat dong ma IP khong, kiem tra log TLS handshake va `default_sni`.
+- Sau khi test HTTPS thanh cong, phat hanh `v1.0.6` bang `./scripts/publish.ps1 -Version 1.0.6`.

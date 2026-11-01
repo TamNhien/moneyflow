@@ -500,7 +500,7 @@ def send_reset_email(address: str, token: str):
     sender=os.environ['SMTP_FROM'].strip()
     user=os.environ.get('SMTP_USER','').strip()
     password=os.environ.get('SMTP_PASSWORD','')
-    link=f"http://127.0.0.1:8765/reset?token={token}"
+    link=f"{os.environ.get('APP_BASE_URL','http://127.0.0.1:8765').rstrip('/')}/reset?token={token}"
     message=EmailMessage()
     message['From']=sender
     message['To']=address
@@ -864,5 +864,5 @@ def root():
 
 @app.get('/{asset:path}')
 def static_assets(asset:str):
-    if asset not in {'main.css','app.js','favicon.svg'}:raise HTTPException(404,'Không tìm thấy tệp.')
+    if asset not in {'main.css','app.js','favicon.svg','logo.svg','apple-touch-icon.png'}:raise HTTPException(404,'Không tìm thấy tệp.')
     return FileResponse(STATIC/asset)

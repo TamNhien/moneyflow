@@ -51,7 +51,7 @@ if ($remoteTag.Count -gt 0) { throw ('Release tag exists on GitHub: ' + $tag) }
 # Whitelist only source paths. Obsolete documentation is staged separately as tracked deletions.
 # Do not pass nonexistent paths to `git add`, which fails with "pathspec did not match any files".
 $allowed = @('.gitignore', '.dockerignore', '.env.example', 'Dockerfile', 'Dockerfile.test',
-             'docker-compose.yml', 'README.md', 'VERSION', 'backend', 'frontend',
+             'docker-compose.yml', 'Caddyfile', 'README.md', 'VERSION', 'backend', 'frontend',
              'scripts', 'tests', '.github', 'preview')
 $legacyDocs = @('CHANGELOG.md', 'UPGRADE-TO-v1.0.1.md',
                 'UPGRADE-TO-v1.0.2.md', 'UPGRADE-TO-v1.0.3.md')

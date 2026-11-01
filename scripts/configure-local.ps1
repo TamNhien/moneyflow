@@ -35,5 +35,5 @@ docker compose up -d --build
 if ($LASTEXITCODE -ne 0) { throw 'Khong the khoi dong app. Kiem tra docker compose logs --tail=100 app.' }
 
 docker compose ps
-Write-Host 'MoneyFlow: http://127.0.0.1:8765' -ForegroundColor Green
+Write-Host 'MoneyFlow: https://127.0.0.1:8765' -ForegroundColor Green
 Write-Host 'pgAdmin: 127.0.0.1:5435, DB moneyflow, user moneyflow, password moneyflow' -ForegroundColor Green

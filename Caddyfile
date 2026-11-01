@@ -1,0 +1,22 @@
+{
+    auto_https disable_redirects
+    # HTTPS by IP: browsers often omit SNI in ClientHello.
+    # Select the local IP certificate for TLS handshakes without SNI.
+    default_sni 127.0.0.1
+    skip_install_trust
+}
+
+# Local-only HTTPS. Caddy issues a certificate from its private local CA.
+https://127.0.0.1:8765, https://localhost:8765 {
+    tls internal
+    encode gzip
+    reverse_proxy app:8000
+}
+
+# Optional redirect: typing http://127.0.0.1:8764 routes to the HTTPS address.
+http://127.0.0.1:8764 {
+    redir https://127.0.0.1:8765{uri} 308
+}
+http://localhost:8764 {
+    redir https://localhost:8765{uri} 308
+}

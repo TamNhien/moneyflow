@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-param([string] $Version = '1.0.4')
+param([string] $Version = '1.0.5')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^v?\d+\.\d+\.\d+$') { throw 'Version format: 1.0.4 or v1.0.4' }
 $Version = $Version.TrimStart('v')
@@ -13,7 +13,7 @@ $baseName = 'MoneyFlow-Local-v' + $Version + '-Full-Source.zip'
 $zipPath = Join-Path $dist $baseName
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('moneyflow-release-' + [guid]::NewGuid().ToString('N'))
 $source = Join-Path $stage 'moneyflow'
-$files = @('.gitignore','.dockerignore','.env.example','Dockerfile','Dockerfile.test','docker-compose.yml','README.md','VERSION')
+$files = @('.gitignore','.dockerignore','.env.example','Dockerfile','Dockerfile.test','docker-compose.yml','Caddyfile','README.md','VERSION')
 $folders = @('backend','frontend','scripts','tests','.github','preview')
 $excluded = '(?i)(^|[\\/])(__pycache__|\.pytest_cache|\.git|backups?|dist|node_modules|\.venv|venv|\.mypy_cache)([\\/]|$)|(^|[\\/])\.env$|\.(pyc|db|sqlite|sqlite3|dump|sqlitedb|log|pem|key|p12|pfx|zip)$'
 try {

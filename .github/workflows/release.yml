@@ -14,6 +14,13 @@ jobs:
         shell: bash
         run: |
           test "v$(cat VERSION | tr -d '\r\n')" = "$GITHUB_REF_NAME"
+      - name: Validate HTTPS proxy configuration
+        shell: bash
+        env:
+          DB_PASSWORD: ci-only-placeholder
+        run: |
+          docker compose config --quiet
+          docker run --rm -v "${{ github.workspace }}/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: JavaScript syntax
         run: node --check frontend/app.js
       - name: Build test image

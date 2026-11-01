@@ -11,6 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate HTTPS proxy configuration
+        shell: bash
+        env:
+          DB_PASSWORD: ci-only-placeholder
+        run: |
+          docker compose config --quiet
+          docker run --rm -v "${{ github.workspace }}/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Frontend syntax
         run: node --check frontend/app.js
       - name: Build isolated test runner

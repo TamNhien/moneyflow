@@ -9,5 +9,5 @@ if (-not (Test-Path .\.env)) {
 docker compose up --build -d
 if ($LASTEXITCODE -ne 0) { throw 'Docker Compose khoi dong that bai. Xem: docker compose logs -f' }
 docker compose ps
-Write-Host 'Mo MoneyFlow tai http://127.0.0.1:8765' -ForegroundColor Green
-Start-Process 'http://127.0.0.1:8765'
+Write-Host 'Mo MoneyFlow tai https://127.0.0.1:8765' -ForegroundColor Green
+Write-Host 'Neu lan dau su dung HTTPS, chay: .\scripts\trust-local-https.ps1' -ForegroundColor Yellow

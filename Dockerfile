@@ -8,4 +8,4 @@ COPY frontend /opt/moneyflow/frontend
 RUN useradd --create-home --uid 10001 moneyflow
 USER moneyflow
 EXPOSE 8000
-CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]
+CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]

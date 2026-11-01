@@ -100,7 +100,41 @@ function rows(entries, actions=false){if(!entries?.length)return `<tr><td colspa
  return entries.map(e=>`<tr><td><div class="item-name">${esc(e.title)}</div><div class="item-note">${esc(e.note||'')}</div></td><td>${esc(new Date(e.occurred_on+'T00:00:00').toLocaleDateString('vi-VN'))}</td><td><span class="category-chip">${iconCat(e)} ${esc(e.category)}</span></td><td><span class="tag ${e.kind==='income'?'tag-active':'tag-disabled'}">${e.kind==='income'?'Thu':'Chi'}</span></td><td class="amount ${e.kind}">${e.kind==='income'?'+':'−'}${fmoney(e.amount)}</td>${actions?`<td><div class="row-actions"><button class="table-action" data-action="edit-entry" data-id="${e.id}">Sửa</button><button class="table-action delete" data-action="delete-entry" data-id="${e.id}">Xóa</button></div></td>`:''}</tr>`).join('');}
 function tableHtml(entries,actions=false){return `<div class="table-wrap"><table class="data-table"><thead><tr><th>NỘI DUNG</th><th>NGÀY</th><th>DANH MỤC</th><th>LOẠI</th><th style="text-align:right">SỐ TIỀN</th>${actions?'<th style="text-align:right">THAO TÁC</th>':''}</tr></thead><tbody>${rows(entries,actions)}</tbody></table></div>`}
 function trendChart(trend){const max=Math.max(1,...trend.flatMap(t=>[t.income,t.expense]));return `<div class="chart-wrap"><div class="bar-chart">${trend.map(t=>`<div class="bar-month" title="${esc(monthText(t.month))}: Thu ${fmoney(t.income)} · Chi ${fmoney(t.expense)}"><div class="bar income" style="height:${Math.max(t.income>0?2:0,t.income/max*100)}%"></div><div class="bar expense" style="height:${Math.max(t.expense>0?2:0,t.expense/max*100)}%"></div></div>`).join('')}</div><div class="chart-axis">${trend.map(t=>`<span>T${+t.month.slice(5)}</span>`).join('')}</div></div>`}
-function donutChart(data){const all=data.reduce((s,x)=>s+x.value,0);let soFar=0;let gradient;if(all===0)gradient='#f0f1f7';else gradient=`conic-gradient(${data.map((c)=>{const from=soFar/all*100;soFar+=c.value;return `${c.color} ${from}% ${soFar/all*100}%`}).join(',')})`;return `<div class="donut-layout"><div class="donut" style="background:${esc(gradient)}"><div class="donut-hole"><span>TỔNG CHI TIÊU</span><strong>${esc(fcompact(all))}</strong></div></div><div class="category-legend">${data.length?data.slice(0,6).map(c=>`<div class="cat-legend-item">${iconCat(c)}<span>${esc(c.name)}</span><b>${pct(c.value,all)}%</b></div>`).join(''):empty('Chưa có chi tiêu','Danh mục sẽ hiển thị tại đây.')}</div></div>`}
+// v1.0.5: Radial pie chart (solid sectors reach the centre, unlike a doughnut).
+function donutChart(rawData) {
+  const safeColor = value => /^#[0-9a-fA-F]{6}$/.test(String(value)) ? String(value) : '#8377f9';
+  const parsed = (Array.isArray(rawData) ? rawData : []).map((c, i) => ({
+    name: String(c.name || 'Khác'),
+    value: Number(c.value),
+    color: safeColor(c.color),
+    index: i
+  })).filter(c => Number.isFinite(c.value) && c.value > 0).sort((a, b) => b.value - a.value);
+  const total = parsed.reduce((sum, c) => sum + c.value, 0);
+  if (!total) {
+    return `<div class="pie-layout pie-empty-layout"><div class="pie-chart pie-empty" role="img" aria-label="Chưa có chi tiêu trong tháng"><span class="pie-empty-glyph" aria-hidden="true">✳</span></div><div class="pie-details"><div class="pie-total-label">TỔNG CHI TIÊU</div><div class="pie-total-number">${fmoney(0)}</div>${empty('Chưa có chi tiêu','Danh mục và tỷ trọng sẽ xuất hiện khi bạn thêm khoản chi.')}</div></div>`;
+  }
+  // Keep the legend and the sectors identical when there are more than six categories.
+  const items = parsed.length > 6 ? [
+    ...parsed.slice(0, 5),
+    {name: 'Danh mục khác', value: parsed.slice(5).reduce((sum, c) => sum + c.value, 0), color: '#66738f'}
+  ] : parsed;
+  let start = -Math.PI / 2;
+  const circle = (cx, cy, r) => `${cx},${cy} ${r},${r}`;
+  const sectors = items.map((c, idx) => {
+    const proportion = c.value / total;
+    const end = idx === items.length - 1 ? 3 * Math.PI / 2 : start + proportion * 2 * Math.PI;
+    const x1 = 100 + 90 * Math.cos(start), y1 = 100 + 90 * Math.sin(start);
+    const x2 = 100 + 90 * Math.cos(end), y2 = 100 + 90 * Math.sin(end);
+    const sector = items.length === 1
+      ? `<circle cx="100" cy="100" r="90" fill="${c.color}"/>`
+      : `<path d="M 100 100 L ${x1.toFixed(4)} ${y1.toFixed(4)} A 90 90 0 ${proportion > 0.5 ? 1 : 0} 1 ${x2.toFixed(4)} ${y2.toFixed(4)} Z" fill="${c.color}" stroke="#1b2540" stroke-width="1.7" stroke-linejoin="round"/>`;
+    start = end;
+    return `<g class="pie-sector" tabindex="0" aria-label="${esc(c.name)}: ${pct(c.value,total)}%, ${fmoney(c.value)}"><title>${esc(c.name)} · ${pct(c.value,total)}% · ${fmoney(c.value)}</title>${sector}</g>`;
+  }).join('');
+  const label = items.map(c => `${c.name}: ${pct(c.value,total)}%`).join('; ');
+  return `<div class="pie-layout"><div class="pie-visual"><svg class="pie-chart" viewBox="0 0 200 200" role="img" aria-label="Biểu đồ tròn chi tiêu theo danh mục: ${esc(label)}"><circle cx="100" cy="100" r="94" fill="#283455"/>${sectors}</svg><span class="pie-caption">Biểu đồ tròn · Chia từ tâm</span></div><div class="pie-details"><div class="pie-total-label">TỔNG CHI TIÊU</div><div class="pie-total-number">${fmoney(total)}</div><div class="category-legend">${items.map(c => `<div class="cat-legend-item" title="${esc(c.name)}: ${fmoney(c.value)}"><i class="legend-dot" style="background:${c.color}"></i><span>${esc(c.name)}</span><b>${pct(c.value,total)}%</b></div>`).join('')}</div></div></div>`;
+}
+
 function budgetBars(budgets){return budgets.length?`<div class="budget-stack">${budgets.slice(0,5).map(b=>`<div><div class="budget-name-row"><span>${esc(b.category)}</span><small>${fcompact(b.spent)} / ${fcompact(b.amount)}</small></div><div class="progress-track"><div class="progress-fill" style="width:${Math.min(100,pct(b.spent,b.amount))}%;background:${b.spent>b.amount?'#fc6b88':esc(b.color)}"></div></div>${b.spent>b.amount?'<div class="budget-caption over">⚠ Đã vượt ngân sách</div>':''}</div>`).join('')}</div>`:empty('Chưa tạo ngân sách','Đặt hạn mức cho từng danh mục để kiểm soát chi tiêu.')}
 async function renderDashboard(){const d=await api(`dashboard?month=${state.month}`);state.data=d;const growth=d.balance<0?'danger-text':'';const button=`${d.opening_balance===0 && d.total_income===0 && d.total_expense===0?'<button class="btn btn-soft" data-action="opening-modal">◈ Nhập tiền ban đầu</button>':''}<button class="btn btn-secondary" data-action="add-income">↗ Thêm thu nhập</button>${addButton('Ghi khoản chi')}`;
  $('#page-content').innerHTML=heading(`Xin chào, ${state.user.username}! 👋`,'Đây là bức tranh tài chính của bạn trong '+monthText(state.month)+'.',button)+`<div class="summary-grid"><div class="balance-card"><div class="balance-top"><span>◈ Tổng số dư hiện tại</span><span class="balance-icon">▧</span></div><div class="balance-number ${growth}">${fmoney(d.balance)}</div><div class="balance-foot"><span>Tiền ban đầu: ${fmoney(d.opening_balance)}</span><strong>● Đã đồng bộ</strong></div></div><div class="stat-card"><div class="stat-top"><span>Thu nhập trong tháng</span><div class="stat-icon green">↗</div></div><div class="stat-number">${fmoney(d.month_income)}</div><div class="stat-bottom"><span class="growth green">↗ THU NHẬP</span> Tổng thu ${fcompact(d.total_income)}</div></div><div class="stat-card"><div class="stat-top"><span>Chi tiêu trong tháng</span><div class="stat-icon pink">↘</div></div><div class="stat-number">${fmoney(d.month_expense)}</div><div class="stat-bottom"><span class="growth pink">↘ CHI TIÊU</span> ${d.month_count} giao dịch tháng này</div></div></div>
