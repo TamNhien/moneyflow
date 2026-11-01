@@ -1,0 +1,26 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+# Data and local artifacts
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+*.sqlite*
+*.db
+*.dump
+*.log
+backups/
+backup/
+dist/
+.venv/
+venv/
+node_modules/
+*.zip
+.vscode/
+.idea/

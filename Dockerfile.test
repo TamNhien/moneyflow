@@ -1,0 +1,9 @@
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /opt/moneyflow
+COPY backend/requirements.txt /opt/moneyflow/backend/requirements.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt 'pytest>=8,<10' 'httpx>=0.27,<1'
+COPY backend /opt/moneyflow/backend
+COPY frontend /opt/moneyflow/frontend
+COPY tests /opt/moneyflow/tests
+CMD ["python", "-m", "pytest", "-q", "tests"]

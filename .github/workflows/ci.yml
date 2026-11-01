@@ -1,0 +1,21 @@
+name: MoneyFlow CI
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Frontend syntax
+        run: node --check frontend/app.js
+      - name: Build isolated test runner
+        run: docker build -f Dockerfile.test -t moneyflow-test:ci .
+      - name: Run API tests without network
+        run: docker run --rm --network none moneyflow-test:ci
+      - name: Build application image
+        run: docker build -t moneyflow-app:ci .

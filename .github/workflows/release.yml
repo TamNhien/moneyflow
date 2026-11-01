@@ -1,0 +1,45 @@
+name: MoneyFlow Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag and VERSION consistency
+        shell: bash
+        run: |
+          test "v$(cat VERSION | tr -d '\r\n')" = "$GITHUB_REF_NAME"
+      - name: JavaScript syntax
+        run: node --check frontend/app.js
+      - name: Build test image
+        run: docker build -f Dockerfile.test -t moneyflow-test:release .
+      - name: Test backend (isolated, offline)
+        run: docker run --rm --network none moneyflow-test:release
+      - name: Build application image
+        run: docker build -t moneyflow-app:${{ github.ref_name }} .
+  publish-release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack safe source ZIP and SHA-256
+        shell: pwsh
+        run: ./scripts/package.ps1 -Version '${{ github.ref_name }}'
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/MoneyFlow-Local-${GITHUB_REF_NAME}-Full-Source.zip" \
+            "dist/MoneyFlow-Local-${GITHUB_REF_NAME}-Full-Source.zip.sha256" \
+            --verify-tag \
+            --generate-notes \
+            --title "MoneyFlow Local $GITHUB_REF_NAME"
