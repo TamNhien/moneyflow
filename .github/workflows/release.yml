@@ -34,7 +34,9 @@ jobs:
             }
           }
       - name: JavaScript syntax
-        run: node --check frontend/app.js
+        run: |
+          node --check frontend/app.js
+          node tests/frontend-smoke.mjs
       - name: Build test image
         run: docker build -f Dockerfile.test -t moneyflow-test:release .
       - name: Test backend (isolated, offline)

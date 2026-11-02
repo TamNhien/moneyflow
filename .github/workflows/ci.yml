@@ -31,7 +31,9 @@ jobs:
             }
           }
       - name: Frontend syntax
-        run: node --check frontend/app.js
+        run: |
+          node --check frontend/app.js
+          node tests/frontend-smoke.mjs
       - name: Build isolated test runner
         run: docker build -f Dockerfile.test -t moneyflow-test:ci .
       - name: Run API tests without network

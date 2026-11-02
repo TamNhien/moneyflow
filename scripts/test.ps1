@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
 & (Join-Path $PSScriptRoot 'ensure-docker.ps1')
@@ -13,6 +13,8 @@ Write-Host '[3/3] Check frontend JavaScript (when Node.js is installed)...' -For
 if (Get-Command node -ErrorAction SilentlyContinue) {
     & node --check frontend/app.js
     if ($LASTEXITCODE -ne 0) { throw 'Frontend JavaScript syntax invalid.' }
+    & node tests/frontend-smoke.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend smoke tests failed; publishing must stop.' }
 } else {
     Write-Host 'Node.js not installed; JavaScript syntax check skipped locally (CI runs it).' -ForegroundColor Yellow
 }
