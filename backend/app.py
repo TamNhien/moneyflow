@@ -12,6 +12,8 @@ from email.message import EmailMessage
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from calendar import monthrange
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Literal
 
@@ -131,6 +133,9 @@ class Debt(Base):
     lender: Mapped[str] = mapped_column(String(120), default='')
     principal: Mapped[int] = mapped_column(BigInteger)
     remaining: Mapped[int] = mapped_column(BigInteger)
+    direction: Mapped[str] = mapped_column(String(12), default='payable', server_default='payable')
+    annual_rate_bps: Mapped[int] = mapped_column(Integer, default=0, server_default='0')
+    installment_count: Mapped[int] = mapped_column(Integer, default=1, server_default='1')
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     note: Mapped[str] = mapped_column(String(500), default='')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -145,6 +150,7 @@ class DebtPayment(Base):
     entry_id: Mapped[int | None] = mapped_column(ForeignKey('entries.id'), nullable=True, index=True)
     wallet_id: Mapped[int | None] = mapped_column(ForeignKey('wallets.id'), nullable=True, index=True)
     amount: Mapped[int] = mapped_column(BigInteger)
+    interest_amount: Mapped[int] = mapped_column(BigInteger, default=0, server_default='0')
     mode: Mapped[str] = mapped_column(String(10))  # auto: from an income; manual: from available balance
     paid_on: Mapped[date] = mapped_column(Date, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -205,6 +211,10 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS wallet_id INTEGER REFERENCES wallets(id)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_entries_wallet_id ON entries (wallet_id)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_debt_payments_wallet_id ON debt_payments (wallet_id)'))
+            conn.execute(text("ALTER TABLE debts ADD COLUMN IF NOT EXISTS direction VARCHAR(12) NOT NULL DEFAULT 'payable'"))
+            conn.execute(text('ALTER TABLE debts ADD COLUMN IF NOT EXISTS annual_rate_bps INTEGER NOT NULL DEFAULT 0'))
+            conn.execute(text('ALTER TABLE debts ADD COLUMN IF NOT EXISTS installment_count INTEGER NOT NULL DEFAULT 1'))
+            conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS interest_amount BIGINT NOT NULL DEFAULT 0'))
         else:
             columns = {row[1] for row in conn.execute(text('PRAGMA table_info(users)'))}
             for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300)')]:
@@ -216,6 +226,14 @@ async def lifespan(_app: FastAPI):
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_entries_wallet_id ON entries (wallet_id)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_debt_payments_wallet_id ON debt_payments (wallet_id)'))
+            for table, columns in {
+                'debts':[('direction',"VARCHAR(12) NOT NULL DEFAULT 'payable'"),('annual_rate_bps','INTEGER NOT NULL DEFAULT 0'),('installment_count','INTEGER NOT NULL DEFAULT 1')],
+                'debt_payments':[('interest_amount','BIGINT NOT NULL DEFAULT 0')],
+            }.items():
+                existing = {row[1] for row in conn.execute(text(f'PRAGMA table_info({table})'))}
+                for col, definition in columns:
+                    if col not in existing:
+                        conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {definition}'))
     # Idempotent upgrade: create exactly one default wallet for each legacy account.
     # Existing opening_balance, entries and debt payments are reassigned, not copied.
     with SessionLocal.begin() as db:
@@ -340,10 +358,51 @@ def account_locked(db,user_id):
 
 
 def debt_paid_total(db, user_id, entry_id=None):
-    stmt = select(func.coalesce(func.sum(DebtPayment.amount), 0)).where(DebtPayment.user_id == user_id)
+    """Payable PRINCIPAL repaid; receivable collection isn't a debt expense."""
+    stmt = select(func.coalesce(func.sum(DebtPayment.amount), 0)).join(
+        Debt, Debt.id == DebtPayment.debt_id).where(
+        DebtPayment.user_id == user_id, Debt.direction == 'payable')
     if entry_id is not None:
         stmt = stmt.where(DebtPayment.entry_id == entry_id)
     return int(db.scalar(stmt) or 0)
+
+
+def debt_cash_delta(db, user_id, wallet_id=None):
+    """Debt repayments affect cash once; principal itself is not an expense."""
+    stmt = select(DebtPayment.amount, DebtPayment.interest_amount, Debt.direction).join(
+        Debt, Debt.id == DebtPayment.debt_id).where(DebtPayment.user_id == user_id)
+    if wallet_id is not None:
+        stmt = stmt.where(DebtPayment.wallet_id == wallet_id)
+    return sum((int(principal) + int(interest or 0)) * (1 if direction == 'receivable' else -1)
+               for principal, interest, direction in db.execute(stmt))
+
+
+def add_months_clamped(value: date, months: int) -> date:
+    index = value.year * 12 + value.month - 1 + months
+    year, month = divmod(index, 12)
+    return date(year, month + 1, min(value.day, monthrange(year, month + 1)[1]))
+
+
+def debt_schedule_rows(d: Debt) -> list[dict]:
+    """Illustrative declining-balance equal-principal installments; no auto interest posting."""
+    count = int(d.installment_count or 1)
+    base, remainder = divmod(int(d.principal), count)
+    remaining = int(d.principal)
+    paid = int(d.principal) - int(d.remaining)
+    first_date = d.due_date
+    rows = []
+    for i in range(count):
+        principal = base + (1 if i < remainder else 0)
+        interest = int((Decimal(remaining) * Decimal(d.annual_rate_bps or 0) / Decimal(120000)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        deadline = add_months_clamped(first_date, i) if first_date else None
+        paid_on_installment = min(max(paid, 0), principal)
+        paid -= paid_on_installment
+        rows.append({'period':i+1,'due_date':deadline.isoformat() if deadline else None,
+                     'principal':principal,'estimated_interest':interest,'estimated_total':principal+interest,
+                     'principal_paid':paid_on_installment,
+                     'status':'paid' if paid_on_installment >= principal else ('overdue' if deadline and deadline < date.today() else 'upcoming')})
+        remaining -= principal
+    return rows
 
 
 def default_wallet(db: Session, user_id: int) -> Wallet:
@@ -372,13 +431,12 @@ def wallet_balance(db: Session, wallet: Wallet) -> int:
         Entry.user_id == user_id, Entry.wallet_id == wallet_id, Entry.kind == 'income')) or 0
     expense = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(
         Entry.user_id == user_id, Entry.wallet_id == wallet_id, Entry.kind == 'expense')) or 0
-    debt_paid = db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(
-        DebtPayment.user_id == user_id, DebtPayment.wallet_id == wallet_id)) or 0
+    debt_delta = debt_cash_delta(db, user_id, wallet_id)
     incoming = db.scalar(select(func.coalesce(func.sum(WalletTransfer.amount),0)).where(
         WalletTransfer.user_id == user_id, WalletTransfer.to_wallet_id == wallet_id)) or 0
     outgoing = db.scalar(select(func.coalesce(func.sum(WalletTransfer.amount),0)).where(
         WalletTransfer.user_id == user_id, WalletTransfer.from_wallet_id == wallet_id)) or 0
-    return int(wallet.opening_balance) + int(income) - int(expense) - int(debt_paid) + int(incoming) - int(outgoing)
+    return int(wallet.opening_balance) + int(income) - int(expense) + int(debt_delta) + int(incoming) - int(outgoing)
 
 
 def current_balance(db, user_id, opening=None):
@@ -388,7 +446,7 @@ def current_balance(db, user_id, opening=None):
     opening_sum = sum(w.opening_balance for w in wallets)
     if opening is not None:
         opening_sum += int(opening) - default_wallet(db, user_id).opening_balance
-    return int(opening_sum)+int(inc)-int(exp)-debt_paid_total(db,user_id),int(inc),int(exp)
+    return int(opening_sum)+int(inc)-int(exp)+debt_cash_delta(db,user_id),int(inc),int(exp)
 
 
 def ensure_nonnegative(db, user_id):
@@ -412,7 +470,7 @@ def allocate_income_to_debts(db, user_id, entry):
         return 0
     available = int(entry.amount)
     paid = 0
-    for debt in db.scalars(select(Debt).where(Debt.user_id==user_id,Debt.remaining>0).order_by(Debt.id).with_for_update()):
+    for debt in db.scalars(select(Debt).where(Debt.user_id==user_id,Debt.direction=='payable',Debt.remaining>0).order_by(Debt.id).with_for_update()):
         if available == 0:
             break
         value = min(available, debt.remaining)
@@ -523,13 +581,18 @@ class Opening(BaseModel):
 class NewDebt(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     lender: str = Field(default='', max_length=120)
+    direction: Literal['payable','receivable'] = 'payable'
     principal: int
-    due_date: date | None = None
+    interest_rate_pct: Decimal = Field(default=Decimal('0'), ge=0, le=100, decimal_places=2)
+    installment_count: int = Field(default=1, ge=1, le=360)
+    due_date: date | None = None  # first scheduled due date
     note: str = Field(default='', max_length=500)
+
 
 
 class ManualDebtPayment(BaseModel):
     amount: int
+    interest_amount: int = 0
     paid_on: date = Field(default_factory=date.today)
     wallet_id: int | None = None
 
@@ -805,9 +868,11 @@ def entry_json(e,cats,paid=0):
     return {'id':e.id,'kind':e.kind,'wallet_id':e.wallet_id,'title':e.title,'amount':e.amount,'category_id':e.category_id,'category':c.name if c else 'Không rõ','color':c.color if c else '#7567F8','note':e.note,'occurred_on':e.occurred_on.isoformat(),'created_at':e.created_at.isoformat(),'debt_paid':paid}
 
 
-def debt_dict(d:Debt):
+def debt_dict(d: Debt):
     return {'id':d.id,'name':d.name,'lender':d.lender,'principal':d.principal,
             'remaining':d.remaining,'paid':d.principal-d.remaining,
+            'direction':d.direction,'interest_rate_pct':float(Decimal(d.annual_rate_bps or 0)/100),
+            'installment_count':d.installment_count,
             'due_date':d.due_date.isoformat() if d.due_date else None,
             'note':d.note,'created_at':d.created_at.isoformat()}
 
@@ -817,23 +882,53 @@ def list_debts(u:User=Depends(current),db:Session=Depends(get_db)):
     debts=list(db.scalars(select(Debt).where(Debt.user_id==u.id).order_by(Debt.id)))
     payments=list(db.scalars(select(DebtPayment).where(DebtPayment.user_id==u.id).order_by(DebtPayment.paid_on.desc(),DebtPayment.id.desc()).limit(100)))
     names={debt.id:debt.name for debt in debts}
+    directions={debt.id:debt.direction for debt in debts}
+    payables=[d for d in debts if d.direction=='payable']
+    receivables=[d for d in debts if d.direction=='receivable']
     return {'items':[debt_dict(d) for d in debts],
-            'total_principal':sum(d.principal for d in debts),
-            'total_remaining':sum(d.remaining for d in debts),
-            'total_paid':sum(d.principal-d.remaining for d in debts),
+            'total_principal':sum(d.principal for d in payables),
+            'total_remaining':sum(d.remaining for d in payables),
+            'total_paid':sum(d.principal-d.remaining for d in payables),
+            'total_receivable_principal':sum(d.principal for d in receivables),
+            'total_receivable_remaining':sum(d.remaining for d in receivables),
+            'total_receivable_collected':sum(d.principal-d.remaining for d in receivables),
+            'total_interest_paid':int(db.scalar(select(func.coalesce(func.sum(DebtPayment.interest_amount),0)).join(Debt, Debt.id==DebtPayment.debt_id).where(DebtPayment.user_id==u.id,Debt.direction=='payable')) or 0),
+            'total_interest_received':int(db.scalar(select(func.coalesce(func.sum(DebtPayment.interest_amount),0)).join(Debt, Debt.id==DebtPayment.debt_id).where(DebtPayment.user_id==u.id,Debt.direction=='receivable')) or 0),
             'payments':[{'id':p.id,'debt_id':p.debt_id,'debt':names.get(p.debt_id,''),
-                         'entry_id':p.entry_id,'wallet_id':p.wallet_id,'amount':p.amount,'mode':p.mode,
+                         'direction':directions.get(p.debt_id,'payable'),
+                         'entry_id':p.entry_id,'wallet_id':p.wallet_id,'amount':p.amount,
+                         'interest_amount':p.interest_amount or 0,'mode':p.mode,
                          'paid_on':p.paid_on.isoformat()} for p in payments]}
+
+
+@app.get('/api/debts/{debt_id}/schedule')
+def get_debt_schedule(debt_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    d=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id))
+    if not d:raise HTTPException(404,'Không tìm thấy khoản nợ.')
+    rows=debt_schedule_rows(d)
+    interest_paid=int(db.scalar(select(func.coalesce(func.sum(DebtPayment.interest_amount),0)).where(
+        DebtPayment.user_id==u.id,DebtPayment.debt_id==d.id)) or 0)
+    return {'debt':debt_dict(d),'schedule':rows,
+            'estimated_total_interest':sum(x['estimated_interest'] for x in rows),
+            'actual_interest_recorded':interest_paid,
+            'disclaimer':'Lịch dự tính theo dư nợ giảm dần, gốc chia đều mỗi kỳ; chưa tự động ghi nhận lãi hoặc tạo giao dịch.'}
 
 
 @app.post('/api/debts')
 def create_debt(data:NewDebt,u:User=Depends(current),db:Session=Depends(get_db)):
     check_amount(data.principal)
     if not data.name.strip():raise HTTPException(422,'Tên khoản nợ không được rỗng.')
+    if data.installment_count > 1 and not data.due_date:
+        raise HTTPException(422,'Cần ngày đến hạn kỳ đầu để lập lịch trả góp.')
+    if data.installment_count > data.principal:
+        raise HTTPException(422,'Số kỳ không thể lớn hơn số đơn vị tiền gốc (VNĐ).')
     account_locked(db,u.id)
     d=Debt(user_id=u.id,name=data.name.strip(),lender=data.lender.strip(),
-           principal=data.principal,remaining=data.principal,due_date=data.due_date,note=data.note.strip())
-    db.add(d);db.flush();log(db,u.id,'debt_created',f'#{d.id}: {d.principal}');db.commit()
+           principal=data.principal,remaining=data.principal,due_date=data.due_date,
+           direction=data.direction,
+           annual_rate_bps=int(data.interest_rate_pct * 100),installment_count=data.installment_count,
+           note=data.note.strip())
+    db.add(d);db.flush();log(db,u.id,'debt_created',f'#{d.id}: {d.principal} {d.direction}');db.commit()
     return debt_dict(d)
 
 
@@ -841,12 +936,20 @@ def create_debt(data:NewDebt,u:User=Depends(current),db:Session=Depends(get_db))
 def edit_debt(debt_id:int,data:NewDebt,u:User=Depends(current),db:Session=Depends(get_db)):
     check_amount(data.principal)
     if not data.name.strip():raise HTTPException(422,'Tên khoản nợ không được rỗng.')
+    if data.installment_count > 1 and not data.due_date:
+        raise HTTPException(422,'Cần ngày đến hạn kỳ đầu để lập lịch trả góp.')
+    if data.installment_count > data.principal:
+        raise HTTPException(422,'Số kỳ không thể lớn hơn số đơn vị tiền gốc (VNĐ).')
     account_locked(db,u.id)
     d=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
     if not d:raise HTTPException(404,'Không tìm thấy khoản nợ.')
-    if data.principal != d.principal and db.scalar(select(func.count()).select_from(DebtPayment).where(DebtPayment.debt_id==d.id)):
-        raise HTTPException(409,'Khoản nợ đã có lịch sử trả. Không thể đổi nợ gốc; hãy tạo khoản nợ điều chỉnh riêng.')
-    if data.principal != d.principal:d.principal=data.principal;d.remaining=data.principal
+    paid=db.scalar(select(func.count()).select_from(DebtPayment).where(DebtPayment.debt_id==d.id))
+    new_bps=int(data.interest_rate_pct*100)
+    if paid and (data.principal!=d.principal or data.direction!=d.direction or
+                 new_bps!=(d.annual_rate_bps or 0) or data.installment_count!=d.installment_count or data.due_date!=d.due_date):
+        raise HTTPException(409,'Khoản nợ đã có thanh toán: không thể đổi gốc, chiều nợ, lãi suất hay lịch trả góp.')
+    if data.principal!=d.principal:d.principal=data.principal;d.remaining=data.principal
+    d.direction=data.direction;d.annual_rate_bps=new_bps;d.installment_count=data.installment_count
     d.name=data.name.strip();d.lender=data.lender.strip();d.due_date=data.due_date;d.note=data.note.strip()
     db.flush();log(db,u.id,'debt_edited',f'#{d.id}');db.commit();return debt_dict(d)
 
@@ -864,17 +967,21 @@ def delete_debt(debt_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
 @app.post('/api/debts/{debt_id}/payments')
 def pay_debt_manual(debt_id:int,data:ManualDebtPayment,u:User=Depends(current),db:Session=Depends(get_db)):
     amount=check_amount(data.amount)
+    interest=check_amount(data.interest_amount,zero=True)
+    if amount+interest>MAX_AMOUNT:raise HTTPException(422,'Tổng tiền vượt hạn mức.')
     if data.paid_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày thanh toán không hợp lệ.')
     account_locked(db,u.id)
     debt=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
     if not debt:raise HTTPException(404,'Không tìm thấy khoản nợ.')
-    if amount>debt.remaining:raise HTTPException(409,'Số tiền trả vượt quá nợ gốc còn lại.')
-    wallet = wallet_for(db,u.id,data.wallet_id,require_active=True)
-    if amount>wallet_balance(db,wallet):raise HTTPException(409,'Ví đã chọn không đủ tiền để trả nợ.')
+    if amount>debt.remaining:raise HTTPException(409,'Số tiền gốc vượt quá số dư nợ còn lại.')
+    wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
+    if debt.direction=='payable' and amount+interest>wallet_balance(db,wallet):
+        raise HTTPException(409,'Ví đã chọn không đủ tiền để trả gốc và lãi.')
     debt.remaining-=amount
-    db.add(DebtPayment(user_id=u.id,debt_id=debt.id,wallet_id=wallet.id,amount=amount,mode='manual',paid_on=data.paid_on))
+    db.add(DebtPayment(user_id=u.id,debt_id=debt.id,wallet_id=wallet.id,amount=amount,
+                       interest_amount=interest,mode='manual',paid_on=data.paid_on))
     db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'debt_manual_payment',f'#{debt.id}: {amount}');db.commit()
+    log(db,u.id,'debt_manual_payment',f'#{debt.id}: principal={amount}, interest={interest}');db.commit()
     return {'ok':True,'remaining':debt.remaining}
 
 
@@ -886,7 +993,8 @@ def undo_manual_payment(payment_id:int,u:User=Depends(current),db:Session=Depend
     if p.mode!='manual':raise HTTPException(409,'Thanh toán tự động chỉ có thể điều chỉnh bằng giao dịch thu nguồn.')
     d=db.scalar(select(Debt).where(Debt.id==p.debt_id,Debt.user_id==u.id).with_for_update())
     d.remaining+=p.amount;db.delete(p)
-    db.flush();log(db,u.id,'debt_payment_undone',f'#{payment_id}');db.commit();return {'ok':True}
+    db.flush();ensure_nonnegative(db,u.id)
+    log(db,u.id,'debt_payment_undone',f'#{payment_id}');db.commit();return {'ok':True}
 
 
 @app.get('/api/wallets')
@@ -1094,9 +1202,10 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     y,m=valid_month(month);a,b=month_bounds(month)
     balance,all_income,all_expense=current_balance(db,u.id)
     wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==u.id).order_by(Wallet.id)))
-    debt_remaining=int(db.scalar(select(func.coalesce(func.sum(Debt.remaining),0)).where(Debt.user_id==u.id)) or 0)
+    debt_remaining=int(db.scalar(select(func.coalesce(func.sum(Debt.remaining),0)).where(Debt.user_id==u.id,Debt.direction=='payable')) or 0)
+    receivable_remaining=int(db.scalar(select(func.coalesce(func.sum(Debt.remaining),0)).where(Debt.user_id==u.id,Debt.direction=='receivable')) or 0)
     debt_paid=debt_paid_total(db,u.id)
-    month_debt_paid=int(db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(DebtPayment.user_id==u.id,DebtPayment.paid_on>=a,DebtPayment.paid_on<b)) or 0)
+    month_debt_paid=int(db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(DebtPayment.user_id==u.id,DebtPayment.paid_on>=a,DebtPayment.paid_on<b,DebtPayment.debt_id.in_(select(Debt.id).where(Debt.direction=='payable')))) or 0)
     month_entries=list(db.scalars(select(Entry).where(Entry.user_id==u.id,Entry.occurred_on>=a,Entry.occurred_on<b)))
     inc=sum(e.amount for e in month_entries if e.kind=='income')
     exp=sum(e.amount for e in month_entries if e.kind=='expense')
@@ -1122,7 +1231,7 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
             'month_income':inc,'month_expense':exp,'month_count':len(month_entries),'net':inc-exp,
             'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in recent],
             'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
-            'debt_remaining':debt_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance-debt_remaining}
+            'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance-debt_remaining+receivable_remaining}
 
 
 @app.get('/api/export.csv')

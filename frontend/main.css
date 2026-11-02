@@ -301,3 +301,15 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .wallet-tagline{font-size:10px;color:#a5a1fa;margin-top:4px}
 @media(max-width:1260px){.wallet-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.wallet-grid,.wallet-mini-list{grid-template-columns:1fr}.wallet-summary strong{font-size:28px}}
+
+/* v1.0.12: Payables / receivables and installment plan */
+.debt-summary-four{grid-template-columns:repeat(4,minmax(0,1fr))}
+.debt-summary-four .debt-due{background:linear-gradient(125deg,#2b295e,#1b3251)}
+.debt-summary-four .debt-summary:nth-child(2){border-color:#235c60;background:linear-gradient(125deg,#173a41,#17273f)}
+.debt-loan-meta{display:flex;flex-wrap:wrap;gap:7px;margin:-7px 0 17px}
+.debt-loan-meta span{border:1px solid #394b71;background:#23304c;color:#c9d5ef;border-radius:24px;padding:5px 9px;font-size:10px;font-weight:700}
+.debt-schedule-table{min-width:700px}
+.debt-schedule-table td{font-size:12px;white-space:nowrap}
+.debt-explainer b{color:#dfdefe}
+@media(max-width:1150px){.debt-summary-four{grid-template-columns:repeat(2,minmax(0,1fr))}.debt-summary-four .debt-due{grid-column:auto}}
+@media(max-width:620px){.debt-summary-four{grid-template-columns:1fr}.debt-loan-meta{margin-top:0}}

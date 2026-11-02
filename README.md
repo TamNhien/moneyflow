@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.11
+# MoneyFlow Local v1.0.12
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, ngân sách, **quản lý nợ gốc** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -66,6 +66,17 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 
 Giữ các volume Docker để không mất database và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
 
+## v1.0.12 — Quản lý nợ chuyên sâu (nợ phải trả và phải thu)
+
+- **Phân biệt chiều nợ:** **Phải trả** (mình vay tiền) và **Phải thu** (mình đã cho người khác vay). Nợ của các tài khoản người dùng được tách biệt.
+- **Lãi suất năm:** nhập từ 0–100%/năm (tối đa hai chữ số thập phân); lập lịch *tham khảo* tính theo **dư nợ giảm dần, chia đều tiền gốc theo từng tháng**. Chưa hỗ trợ lãi kép, thay đổi lãi theo kỳ, ngày thực tế/365, phí trả chậm hoặc điều kiện ngân hàng đặc thù.
+- **Trả góp:** 1–360 kỳ, yêu cầu ngày đến hạn kỳ đầu với nhiều kỳ; xem từng kỳ gồm hạn trả, gốc kế hoạch, lãi ước tính, tổng ước tính và tiến độ gốc. Gốc/lãi ước tính **không tự ghi bút toán** vào ví; khoản thu/chi thực tế chỉ phát sinh khi người dùng xác nhận.
+- **Thanh toán thực tế:** ghi **gốc** (bắt buộc lớn hơn 0) và **lãi thực trả/thu** riêng. Nợ phải trả: ví trừ *(gốc + lãi)*; nợ phải thu: ví cộng *(gốc + lãi)*; **chỉ tiền gốc làm giảm dư nợ**. Không nhập cùng khoản thu hồi nợ vào mục “Thu nhập” lần nữa vì sẽ tính trùng tiền.
+- **Tự trừ nợ giữ nguyên:** các khoản **Thu nhập mới** chỉ tự trả **nợ phải trả** theo thứ tự tạo trước, mặc định trả **gốc**, không tự tính hay trừ lãi. Nợ phải thu chỉ giảm khi chọn **Thu hồi** trong Quản lý nợ.
+- **An toàn sổ sách:** giới hạn tổng thanh toán không vượt trần; không thể thanh toán vượt dư nợ gốc, trả nợ khi ví không đủ tiền hoặc hoàn tác khoản thu hồi đã sử dụng hết. Khoản nợ đã có thanh toán khóa các điều khoản trọng yếu (gốc, chiều nợ, lãi suất, số kỳ và lịch); vẫn sửa được tên/đối tác/ghi chú. Không xóa khoản có lịch sử thanh toán.
+- **Tổng quan:** nợ phải trả, nợ phải thu và **tài sản ròng = tổng số dư ví − nợ phải trả + nợ phải thu** (chưa gồm tài sản/nghĩa vụ khác). Tiền lãi thực thu/trả của các khoản nợ hiển thị riêng, không tự ghi vào thống kê danh mục thu/chi.
+- **Migration không phá dữ liệu:** cột mới trên `debts` là `direction`, `annual_rate_bps`, `installment_count`; trên `debt_payments` là `interest_amount`. Nợ từ v1.0.11 hoặc cũ hơn mặc định **phải trả, 0%/năm, 1 kỳ, lãi thực tế 0**; ví/giao dịch/tiền đã trả nợ cũ vẫn được giữ nguyên. Migration được kiểm thử lặp lại trên SQLite; PostgreSQL Windows/Docker thực tế cần xác nhận sau khi chạy.
+
 ## v1.0.11 — Quản lý nhiều ví
 
 - Mỗi tài khoản có **Ví chính**, có thể tạo tối đa 30 ví: **Tiền mặt, Ngân hàng, Ví điện tử**. Số dư được tính độc lập từ tiền đầu kỳ, giao dịch, trả nợ và chuyển ví.
@@ -78,10 +89,10 @@ Giữ các volume Docker để không mất database và CA cũ. Không dùng `d
 
 ## Chức năng
 
-- **Tiền ban đầu và số dư:** số dư = tiền gốc + tổng thu nhập − chi tiêu − tiền đã trả nợ. Chặn thao tác khiến số dư âm.
+- **Tiền ban đầu và số dư:** số dư = tiền gốc + thu nhập − chi tiêu − trả nợ gốc/lãi + tiền thu hồi nợ gốc/lãi. Các lần chuyển ví không làm thay đổi tổng số dư. Chặn thao tác khiến từng ví âm.
 - **Giao dịch thu/chi:** thêm, sửa, xóa, lọc theo tháng, danh mục; xuất CSV UTF-8 BOM.
-- **Quản lý nợ:** tạo các khoản nợ gốc và người cho vay, ngày đến hạn, ghi chú; theo dõi nợ còn lại, đã trả, thanh toán thủ công và hoàn tác.
-- **Tự trừ nợ khi thu nhập mới:** khoản tiền mới được phân bổ cho nợ đang còn theo thứ tự tạo trước; chỉ phần dư mới tăng số dư. Không trừ hồi tố các giao dịch thu nhập cũ, không tính trả nợ gốc như chi phí sinh hoạt.
+- **Quản lý nợ:** nợ phải trả/phải thu, người vay/cho vay, lịch trả góp, lãi suất ước tính, lịch sử gốc và lãi thực tế; có thu hồi/trả thủ công và hoàn tác khi hợp lệ.
+- **Tự trừ nợ khi thu nhập mới:** khoản tiền mới chỉ phân bổ trả **nợ phải trả** theo thứ tự tạo trước; phần dư mới tăng số dư. Không trừ hồi tố các giao dịch thu nhập cũ, không tính trả nợ gốc như chi phí sinh hoạt.
 - **Thống kê:** tổng thu/chi, biến động 6 tháng, biểu đồ tròn chia từ tâm theo danh mục, ngân sách, số nợ và tài sản ròng.
 - **Tài khoản:** username, email, điện thoại Việt Nam dạng `0...` (tự nhận `+84`, `84`, `0084`), địa chỉ; phân quyền Admin/Member, khóa tài khoản, nhật ký hệ thống. Tài khoản có sổ giao dịch riêng.
 - **Mật khẩu:** Argon2id với salt riêng, xác nhận mật khẩu, thanh đo độ mạnh và kiểm tra ở backend; khôi phục bằng liên kết email dùng một lần, hết hạn 15 phút khi có SMTP.
@@ -109,7 +120,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.11
+.\scripts\publish.ps1 -Version 1.0.12
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -118,17 +129,17 @@ Từ lần phát hành kế tiếp, khi phiên bản trước đã được phá
 
 ### Xác nhận GitHub Release và thông báo tự động (v1.0.10)
 
-Sau khi push `v1.0.10`, `publish.ps1` tự đợi workflow `release.yml` **đúng tag và commit** hoàn thành, kiểm tra kết quả thành công, xác minh Release đã **xuất bản (không ở dạng draft)** và đã tải lên **hai file Full Source ZIP và SHA-256 có dung lượng khác 0**. Chỉ khi đó mới hiện thông báo màu xanh trong PowerShell kèm URL Release và **hộp thoại xác nhận trên Windows** (có thể tắt bằng `-NoReleasePopup`). Đang chạy, lỗi hoặc hết thời gian không được báo thành công.
+Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` **đúng tag và commit** hoàn thành, kiểm tra kết quả thành công, xác minh Release đã **xuất bản (không ở dạng draft)** và đã tải lên **hai file Full Source ZIP và SHA-256 có dung lượng khác 0**. Chỉ khi đó mới hiện thông báo màu xanh trong PowerShell kèm URL Release và **hộp thoại xác nhận trên Windows** (có thể tắt bằng `-NoReleasePopup`). Đang chạy, lỗi hoặc hết thời gian không được báo thành công.
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.11
+.\scripts\publish.ps1 -Version 1.0.12
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
 
 ```powershell
-.\scripts\verify-release.ps1 -Version 1.0.11
+.\scripts\verify-release.ps1 -Version 1.0.12
 ```
 
 Tùy chọn thời gian chờ (mặc định 1200 giây = 20 phút):
@@ -162,6 +173,7 @@ Nếu lần phát hành đã push tag nhưng GitHub Actions bị lỗi, **không
 | v1.0.8 | Tự mở Docker Desktop khi test/build/chạy/phát hành; đợi Engine và thêm lệnh `run.ps1`. |
 | v1.0.9 | Nút Đăng xuất cạnh tài khoản; chuẩn hóa số điện thoại Việt Nam về đầu số 0. |
 | **v1.0.10** | **Theo dõi GitHub Actions đến khi hoàn thành, xác minh Release published + ZIP/SHA-256, hiển thị thông báo PowerShell và popup Windows khi thành công; lỗi hoặc timeout sẽ báo chính xác.** |
-| **v1.0.11** | **Quản lý nhiều ví tiền mặt/ngân hàng/ví điện tử, chuyển ví nội bộ không tính thu/chi, gắn thu chi và trả nợ vào từng ví, migration an toàn từ sổ cũ.** |
+| v1.0.11 | Quản lý nhiều ví tiền mặt/ngân hàng/ví điện tử, chuyển ví nội bộ không tính thu/chi, gắn thu chi và trả nợ vào từng ví, migration an toàn từ sổ cũ. |
+| **v1.0.12** | **Phân loại nợ phải trả/phải thu; thu hồi theo ví; nhập lãi thực tế; lịch trả góp và lãi ước tính; bảo vệ tính toàn vẹn dòng tiền và migration dữ liệu nợ cũ.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

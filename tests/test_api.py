@@ -252,6 +252,7 @@ def test_debts_auto_repayment_and_consistency(client):
     assert r.status_code==200,r.text
     assert client.get('/api/dashboard?month=2026-11').json()['balance']==20_000
     assert client.get('/api/debts').json()['total_remaining']==0
+
     # Undo income: it should restore the debt it paid; the 80,000 expense
     # would then cause an overdraft, so the whole operation must roll back.
     r=auth_post(client,f'/api/transactions/{second_id}',csrf=csrf,method='delete')
@@ -372,3 +373,84 @@ def test_wallets_transfer_income_expense_and_debt(client):
     owner_csrf=client.get('/api/me').json()['csrf_token']
     assert auth_post(client,'/api/wallet-transfers',transfer,csrf=owner_csrf).status_code==422
     assert auth_post(client,'/api/transactions',transaction('income',100,bank_id),csrf=owner_csrf).status_code==422
+
+
+def test_advanced_receivables_installments_interest_and_wallet_cashflow(client):
+    # Isolated account ensures debt figures from older tests do not mix in.
+    root_login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert root_login.status_code==200,root_login.text
+    root_csrf=root_login.json()['csrf_token']
+    unique='loan'+uuid4().hex[:10]
+    r=auth_post(client,'/api/users',credentials(unique),csrf=root_csrf)
+    assert r.status_code==200,r.text
+    r=auth_post(client,'/api/login',{'username':unique,'password':'SecurePassword@12345'})
+    assert r.status_code==200,r.text
+    csrf=r.json()['csrf_token']
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':1000000},method='put',csrf=csrf).status_code==200
+    payable={'name':'Vay mua xe','lender':'Ngân hàng','principal':200000,'direction':'payable',
+             'interest_rate_pct':'12.00','installment_count':4,'due_date':'2026-12-01','note':''}
+    receivable={'name':'Cho bạn vay','lender':'Bạn A','principal':90000,'direction':'receivable',
+                'interest_rate_pct':'6.00','installment_count':3,'due_date':'2027-01-31','note':''}
+    p=auth_post(client,'/api/debts',payable,csrf=csrf);assert p.status_code==200,p.text;pid=p.json()['id']
+    r=auth_post(client,'/api/debts',receivable,csrf=csrf);assert r.status_code==200,r.text;rid=r.json()['id']
+    schedule=client.get(f'/api/debts/{pid}/schedule');assert schedule.status_code==200,schedule.text
+    sched=schedule.json()['schedule']
+    assert len(sched)==4 and sched[0]['principal']==50000 and sched[0]['estimated_interest']==2000
+    assert sched[-1]['due_date']=='2027-03-01'
+    r2=client.get(f'/api/debts/{rid}/schedule').json()['schedule']
+    assert r2[1]['due_date']=='2027-02-28' and r2[2]['due_date']=='2027-03-31'
+    assert auth_post(client,'/api/debts', {**receivable,'installment_count':2,'due_date':None},csrf=csrf).status_code==422
+    assert auth_post(client,'/api/debts',{**payable,'interest_rate_pct':101},csrf=csrf).status_code==422
+    assert auth_post(client,'/api/debts',{**payable,'installment_count':361},csrf=csrf).status_code==422
+    paid=auth_post(client,f'/api/debts/{pid}/payments',{'amount':50000,'interest_amount':5000,'paid_on':'2026-11-01'},csrf=csrf)
+    assert paid.status_code==200,paid.text
+    rec=auth_post(client,f'/api/debts/{rid}/payments',{'amount':20000,'interest_amount':1000,'paid_on':'2026-11-01'},csrf=csrf)
+    assert rec.status_code==200,rec.text
+    d=client.get('/api/debts').json()
+    assert d['total_remaining']==150000 and d['total_receivable_remaining']==70000
+    assert d['total_interest_paid']==5000 and d['total_interest_received']==1000
+    dash=client.get('/api/dashboard?month=2026-11').json()
+    assert dash['balance']==966000 and dash['net_worth']==886000  # 966k - 150k + 70k
+    assert dash['receivable_remaining']==70000
+    cats=client.get('/api/categories').json();inc=next(c for c in cats if c['kind']=='income')
+    entry={'title':'Lương','kind':'income','amount':100000,'category_id':inc['id'],
+           'occurred_on':'2026-11-02'}
+    add=auth_post(client,'/api/transactions',entry,csrf=csrf)
+    assert add.status_code==200 and add.json()['debt_paid']==100000,add.text
+    d=client.get('/api/debts').json()
+    assert d['total_remaining']==50000 and d['total_receivable_remaining']==70000
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==966000
+    # Even though a receivable remains, extra income is free cash after payables clear.
+    add2=auth_post(client,'/api/transactions',{**entry,'amount':80000},csrf=csrf)
+    assert add2.status_code==200 and add2.json()['debt_paid']==50000,add2.text
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==996000
+    d=client.get('/api/debts').json();assert d['total_remaining']==0 and d['total_receivable_remaining']==70000
+    # Terms freeze once any principal payment is recorded.
+    changed=auth_post(client,f'/api/debts/{rid}',{**receivable,'direction':'payable'},csrf=csrf,method='put')
+    assert changed.status_code==409
+    # Another user cannot query this user's schedule.
+    r=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert r.status_code==200
+    assert client.get(f'/api/debts/{rid}/schedule').status_code==404
+    # Login restores isolated user's view and rollback of a receivable decreases cash.
+    r=auth_post(client,'/api/login',{'username':unique,'password':'SecurePassword@12345'});csrf=r.json()['csrf_token']
+    receivable_payment=next(x for x in client.get('/api/debts').json()['payments'] if x['debt_id']==rid)
+    und=auth_post(client,f'/api/debt-payments/{receivable_payment["id"]}',csrf=csrf,method='delete')
+    assert und.status_code==200,und.text
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==975000
+    # Previously booked payable is unaffected by receivable rollback.
+    assert client.get('/api/debts').json()['total_remaining']==0
+    # A receivable rollback must not make a wallet negative.
+    collected=auth_post(client,f'/api/debts/{rid}/payments',{'amount':30000,'interest_amount':0,'paid_on':'2026-11-02'},csrf=csrf)
+    assert collected.status_code==200,collected.text
+    payment=next(x for x in client.get('/api/debts').json()['payments'] if x['debt_id']==rid)
+    expense=next(x for x in client.get('/api/categories').json() if x['kind']=='expense')
+    used=auth_post(client,'/api/transactions',{'title':'Mua hàng','kind':'expense','amount':1000000,
+        'category_id':expense['id'],'occurred_on':'2026-11-02'},csrf=csrf)
+    assert used.status_code==200,used.text
+    failed=auth_post(client,f'/api/debt-payments/{payment["id"]}',csrf=csrf,method='delete')
+    assert failed.status_code==409,failed.text
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==5000
+    assert auth_post(client,f'/api/transactions/{used.json()["id"]}',csrf=csrf,method='delete').status_code==200
+    assert auth_post(client,f'/api/debt-payments/{payment["id"]}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==975000

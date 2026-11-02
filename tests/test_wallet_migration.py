@@ -32,7 +32,7 @@ def test_legacy_wallet_migration_is_idempotent(tmp_path):
     root = Path(__file__).resolve().parents[1]
     env = {**os.environ, 'DATABASE_URL': 'sqlite:///' + str(db_file), 'PYTHONPATH': str(root)}
     script = '''from fastapi.testclient import TestClient
-from backend.app import app, SessionLocal, Wallet, Entry, DebtPayment, wallet_balance, current_balance
+from backend.app import app, SessionLocal, Wallet, Entry, Debt, DebtPayment, wallet_balance, current_balance, debt_schedule_rows
 from sqlalchemy import select
 with TestClient(app):
  with SessionLocal() as db:
@@ -42,6 +42,11 @@ with TestClient(app):
   assert all(p.wallet_id==wallets[0].id for p in db.scalars(select(DebtPayment)))
   assert wallet_balance(db,wallets[0])==105000
   assert current_balance(db,20)[0]==105000
+  d=db.scalar(select(Debt).where(Debt.id==4))
+  assert d.direction=='payable' and d.annual_rate_bps==0 and d.installment_count==1
+  assert debt_schedule_rows(d)[0]['principal']==15000
+  p=db.scalar(select(DebtPayment).where(DebtPayment.id==6))
+  assert p.interest_amount==0
 '''
     for _ in range(2):
         result = subprocess.run([sys.executable, '-c', script], cwd=root,

@@ -1,5 +1,5 @@
 ﻿#Requires -Version 5.1
-param([string] $Version = '1.0.11')
+param([string] $Version = '1.0.12')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version format: 1.0.4' }
 Set-Location (Split-Path -Parent $PSScriptRoot)
