@@ -1,9 +1,8 @@
 #Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Desktop not found in PATH.' }
-& docker info --format '{{.ServerVersion}}' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Docker Engine is not running. Start Docker Desktop first.' }
+& (Join-Path $PSScriptRoot 'ensure-docker.ps1')
+if (-not $?) { throw 'Docker Engine chua san sang.' }
 Write-Host '[1/3] Build isolated test image...' -ForegroundColor Cyan
 & docker build -f Dockerfile.test -t moneyflow-local-test:latest .
 if ($LASTEXITCODE -ne 0) { throw 'Test image build failed.' }

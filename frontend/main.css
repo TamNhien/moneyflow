@@ -231,3 +231,34 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .auth-mobile-brand img { width: 30px; height: 30px; }
 /* Keep forms and generated cards legible in dark mode. */
 #modal-root, #toast-root { color: #eff4ff; }
+
+
+/* v1.0.7: principal debt tracking */
+.debt-overview-panel { display:flex;align-items:center;justify-content:space-between;gap:22px;margin-bottom:22px;background:linear-gradient(105deg,#202958,#222d49);border-color:#3d4878; }
+.debt-overview-copy { flex:1;min-width:0; }
+.debt-overview-copy h2 { font-size:27px;letter-spacing:-.7px;margin:7px 0;color:#f5f6ff; }
+.debt-overview-copy p,.debt-note {font-size:12px;line-height:1.65;color:#b6c5e5;}
+.debt-overline {color:#b8b0ff;font-size:10px;font-weight:800;letter-spacing:1px;}
+.debt-summary-grid {display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:16px;margin-bottom:18px;}
+.debt-summary {background:#1b2943;border:1px solid #364665;padding:25px;border-radius:17px;min-width:0;display:flex;flex-direction:column;gap:12px;justify-content:center;}
+.debt-due {background:linear-gradient(125deg,#2b295e,#1b3251);border-color:#57528a;}
+.debt-summary span {font-size:10px;letter-spacing:.9px;color:#b8c5dd;font-weight:800;}
+.debt-summary strong {font-size:clamp(21px,2.4vw,33px);letter-spacing:-.6px;color:#fafaff;overflow-wrap:anywhere;}
+.debt-summary small {font-size:11px;color:#a4b8d4;}
+.debt-explainer {font-size:12px;color:#bdc9e1;padding:17px 21px;background:#1a2c46;border:1px solid #344565;border-radius:13px;margin-bottom:20px;line-height:1.8;}
+.debt-explainer strong {color:#bcb3ff;}
+.debt-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:17px;margin-bottom:20px;}
+.debt-card {background:#17243d;border:1px solid #334363;padding:23px;border-radius:16px;min-width:0;}
+.debt-settled {border-color:#236855;}
+.debt-card-top {display:flex;justify-content:space-between;align-items:flex-start;gap:10px;}
+.debt-card h3 {font-size:16px;margin:9px 0;color:#f1f5ff;}
+.debt-lender {font-size:11px;color:#a4b4d0;line-height:1.5;overflow-wrap:anywhere;}
+.debt-amount {font-size:29px;font-weight:800;color:#f4f6ff;letter-spacing:-.6px;margin:24px 0 17px;overflow-wrap:anywhere;}
+.debt-amount small {font-size:12px;color:#8fa3c5;font-weight:500;}
+.debt-card-foot {display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;flex-wrap:wrap;color:#a9b8d5;font-size:11px;}
+.debt-card-foot .row-actions {display:flex;gap:7px;flex-wrap:wrap;}
+.debt-history .amount {color:#67dcb6;}
+@media(max-width:900px){.debt-summary-grid{grid-template-columns:1fr 1fr}.debt-due{grid-column:span 2}.debt-grid{grid-template-columns:1fr}}
+@media(max-width:700px){.debt-overview-panel{flex-direction:column;align-items:flex-start}.debt-summary-grid{grid-template-columns:1fr}.debt-due{grid-column:auto}.debt-card{padding:18px}.debt-amount{font-size:24px}}
+
+.debt-paid-hint{color:#68d9bb;font-size:10px;margin-top:5px;font-weight:650;}

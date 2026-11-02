@@ -94,6 +94,34 @@ class Entry(Base):
     __table_args__ = (CheckConstraint('amount > 0'),)
 
 
+class Debt(Base):
+    """Principal still owed. Creating a debt never changes the cash balance."""
+    __tablename__ = 'debts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    lender: Mapped[str] = mapped_column(String(120), default='')
+    principal: Mapped[int] = mapped_column(BigInteger)
+    remaining: Mapped[int] = mapped_column(BigInteger)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    note: Mapped[str] = mapped_column(String(500), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('principal > 0'), CheckConstraint('remaining >= 0'),)
+
+
+class DebtPayment(Base):
+    __tablename__ = 'debt_payments'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    debt_id: Mapped[int] = mapped_column(ForeignKey('debts.id'), index=True)
+    entry_id: Mapped[int | None] = mapped_column(ForeignKey('entries.id'), nullable=True, index=True)
+    amount: Mapped[int] = mapped_column(BigInteger)
+    mode: Mapped[str] = mapped_column(String(10))  # auto: from an income; manual: from available balance
+    paid_on: Mapped[date] = mapped_column(Date, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('amount > 0'), CheckConstraint("mode IN ('auto','manual')"),)
+
+
 class Budget(Base):
     __tablename__ = 'budgets'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -249,17 +277,56 @@ def account_locked(db,user_id):
     return db.execute(select(User).where(User.id==user_id).with_for_update()).scalar_one()
 
 
+def debt_paid_total(db, user_id, entry_id=None):
+    stmt = select(func.coalesce(func.sum(DebtPayment.amount), 0)).where(DebtPayment.user_id == user_id)
+    if entry_id is not None:
+        stmt = stmt.where(DebtPayment.entry_id == entry_id)
+    return int(db.scalar(stmt) or 0)
+
+
 def current_balance(db, user_id, opening=None):
     inc = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(Entry.user_id==user_id,Entry.kind=='income')) or 0
     exp = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(Entry.user_id==user_id,Entry.kind=='expense')) or 0
     if opening is None:
         opening = db.scalar(select(User.opening_balance).where(User.id==user_id)) or 0
-    return int(opening)+int(inc)-int(exp),int(inc),int(exp)
+    # Debt principal payments are cash outflows, but not ordinary expense-category spending.
+    return int(opening)+int(inc)-int(exp)-debt_paid_total(db,user_id),int(inc),int(exp)
 
 
 def ensure_nonnegative(db, user_id):
     b,_,_ = current_balance(db,user_id)
     if b<0: raise HTTPException(409, f'Giao dịch khiến số dư âm ({b:,}đ). Vui lòng điều chỉnh số tiền.')
+
+
+def allocate_income_to_debts(db, user_id, entry):
+    """Repay active principals oldest first, atomically with the income entry."""
+    if entry.kind != 'income':
+        return 0
+    available = int(entry.amount)
+    paid = 0
+    for debt in db.scalars(select(Debt).where(Debt.user_id==user_id,Debt.remaining>0).order_by(Debt.id).with_for_update()):
+        if available == 0:
+            break
+        value = min(available, debt.remaining)
+        debt.remaining -= value
+        db.add(DebtPayment(user_id=user_id,debt_id=debt.id,entry_id=entry.id,amount=value,mode='auto',paid_on=entry.occurred_on))
+        available -= value
+        paid += value
+    db.flush()
+    return paid
+
+
+def reverse_entry_payments(db, user_id, entry_id):
+    """Revert only allocations belonging to this entry (for editing/deletion)."""
+    payments = list(db.scalars(select(DebtPayment).where(DebtPayment.user_id==user_id,DebtPayment.entry_id==entry_id).order_by(DebtPayment.id).with_for_update()))
+    for payment in payments:
+        debt = db.scalar(select(Debt).where(Debt.id==payment.debt_id,Debt.user_id==user_id).with_for_update())
+        if not debt:
+            raise HTTPException(409, 'Khoản nợ của giao dịch không còn tồn tại.')
+        debt.remaining += payment.amount
+        db.delete(payment)
+    db.flush()
+    return sum(p.amount for p in payments)
 
 
 def session_lookup(request: Request, db: Session):
@@ -342,6 +409,19 @@ class NewEntry(BaseModel):
 
 class Opening(BaseModel):
     opening_balance: int
+
+
+class NewDebt(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    lender: str = Field(default='', max_length=120)
+    principal: int
+    due_date: date | None = None
+    note: str = Field(default='', max_length=500)
+
+
+class ManualDebtPayment(BaseModel):
+    amount: int
+    paid_on: date = Field(default_factory=date.today)
 
 
 class NewCategory(BaseModel):
@@ -590,9 +670,92 @@ def category_for(db,u,cat_id,kind=None,require_active=False):
     return cat
 
 
-def entry_json(e,cats):
+def entry_json(e,cats,paid=0):
     c=cats.get(e.category_id)
-    return {'id':e.id,'kind':e.kind,'title':e.title,'amount':e.amount,'category_id':e.category_id,'category':c.name if c else 'Không rõ','color':c.color if c else '#7567F8','note':e.note,'occurred_on':e.occurred_on.isoformat(),'created_at':e.created_at.isoformat()}
+    return {'id':e.id,'kind':e.kind,'title':e.title,'amount':e.amount,'category_id':e.category_id,'category':c.name if c else 'Không rõ','color':c.color if c else '#7567F8','note':e.note,'occurred_on':e.occurred_on.isoformat(),'created_at':e.created_at.isoformat(),'debt_paid':paid}
+
+
+def debt_dict(d:Debt):
+    return {'id':d.id,'name':d.name,'lender':d.lender,'principal':d.principal,
+            'remaining':d.remaining,'paid':d.principal-d.remaining,
+            'due_date':d.due_date.isoformat() if d.due_date else None,
+            'note':d.note,'created_at':d.created_at.isoformat()}
+
+
+@app.get('/api/debts')
+def list_debts(u:User=Depends(current),db:Session=Depends(get_db)):
+    debts=list(db.scalars(select(Debt).where(Debt.user_id==u.id).order_by(Debt.id)))
+    payments=list(db.scalars(select(DebtPayment).where(DebtPayment.user_id==u.id).order_by(DebtPayment.paid_on.desc(),DebtPayment.id.desc()).limit(100)))
+    names={debt.id:debt.name for debt in debts}
+    return {'items':[debt_dict(d) for d in debts],
+            'total_principal':sum(d.principal for d in debts),
+            'total_remaining':sum(d.remaining for d in debts),
+            'total_paid':sum(d.principal-d.remaining for d in debts),
+            'payments':[{'id':p.id,'debt_id':p.debt_id,'debt':names.get(p.debt_id,''),
+                         'entry_id':p.entry_id,'amount':p.amount,'mode':p.mode,
+                         'paid_on':p.paid_on.isoformat()} for p in payments]}
+
+
+@app.post('/api/debts')
+def create_debt(data:NewDebt,u:User=Depends(current),db:Session=Depends(get_db)):
+    check_amount(data.principal)
+    if not data.name.strip():raise HTTPException(422,'Tên khoản nợ không được rỗng.')
+    account_locked(db,u.id)
+    d=Debt(user_id=u.id,name=data.name.strip(),lender=data.lender.strip(),
+           principal=data.principal,remaining=data.principal,due_date=data.due_date,note=data.note.strip())
+    db.add(d);db.flush();log(db,u.id,'debt_created',f'#{d.id}: {d.principal}');db.commit()
+    return debt_dict(d)
+
+
+@app.put('/api/debts/{debt_id}')
+def edit_debt(debt_id:int,data:NewDebt,u:User=Depends(current),db:Session=Depends(get_db)):
+    check_amount(data.principal)
+    if not data.name.strip():raise HTTPException(422,'Tên khoản nợ không được rỗng.')
+    account_locked(db,u.id)
+    d=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
+    if not d:raise HTTPException(404,'Không tìm thấy khoản nợ.')
+    if data.principal != d.principal and db.scalar(select(func.count()).select_from(DebtPayment).where(DebtPayment.debt_id==d.id)):
+        raise HTTPException(409,'Khoản nợ đã có lịch sử trả. Không thể đổi nợ gốc; hãy tạo khoản nợ điều chỉnh riêng.')
+    if data.principal != d.principal:d.principal=data.principal;d.remaining=data.principal
+    d.name=data.name.strip();d.lender=data.lender.strip();d.due_date=data.due_date;d.note=data.note.strip()
+    db.flush();log(db,u.id,'debt_edited',f'#{d.id}');db.commit();return debt_dict(d)
+
+
+@app.delete('/api/debts/{debt_id}')
+def delete_debt(debt_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    d=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
+    if not d:raise HTTPException(404,'Không tìm thấy khoản nợ.')
+    if db.scalar(select(func.count()).select_from(DebtPayment).where(DebtPayment.debt_id==d.id)):
+        raise HTTPException(409,'Khoản nợ đã có lịch sử thanh toán. Không thể xóa để bảo toàn sổ sách.')
+    db.delete(d);log(db,u.id,'debt_deleted',f'#{debt_id}');db.commit();return {'ok':True}
+
+
+@app.post('/api/debts/{debt_id}/payments')
+def pay_debt_manual(debt_id:int,data:ManualDebtPayment,u:User=Depends(current),db:Session=Depends(get_db)):
+    amount=check_amount(data.amount)
+    if data.paid_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày thanh toán không hợp lệ.')
+    account_locked(db,u.id)
+    debt=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
+    if not debt:raise HTTPException(404,'Không tìm thấy khoản nợ.')
+    if amount>debt.remaining:raise HTTPException(409,'Số tiền trả vượt quá nợ gốc còn lại.')
+    if amount>current_balance(db,u.id)[0]:raise HTTPException(409,'Số dư khả dụng không đủ để trả nợ.')
+    debt.remaining-=amount
+    db.add(DebtPayment(user_id=u.id,debt_id=debt.id,amount=amount,mode='manual',paid_on=data.paid_on))
+    db.flush();ensure_nonnegative(db,u.id)
+    log(db,u.id,'debt_manual_payment',f'#{debt.id}: {amount}');db.commit()
+    return {'ok':True,'remaining':debt.remaining}
+
+
+@app.delete('/api/debt-payments/{payment_id}')
+def undo_manual_payment(payment_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    p=db.scalar(select(DebtPayment).where(DebtPayment.user_id==u.id,DebtPayment.id==payment_id).with_for_update())
+    if not p:raise HTTPException(404,'Không tìm thấy thanh toán.')
+    if p.mode!='manual':raise HTTPException(409,'Thanh toán tự động chỉ có thể điều chỉnh bằng giao dịch thu nguồn.')
+    d=db.scalar(select(Debt).where(Debt.id==p.debt_id,Debt.user_id==u.id).with_for_update())
+    d.remaining+=p.amount;db.delete(p)
+    db.flush();log(db,u.id,'debt_payment_undone',f'#{payment_id}');db.commit();return {'ok':True}
 
 
 @app.get('/api/categories')
@@ -637,7 +800,9 @@ def transactions(month:str|None=None,kind:str|None=None,category_id:int|None=Non
     total=db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     entries=list(db.scalars(stmt.order_by(Entry.occurred_on.desc(),Entry.id.desc()).offset((page-1)*size).limit(size)))
     cats={c.id:c for c in db.scalars(select(Category).where(Category.user_id==u.id))}
-    return {'items':[entry_json(e,cats) for e in entries],'total':total,'page':page,'pages':max(1,(total+size-1)//size)}
+    ids=[e.id for e in entries]
+    allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
+    return {'items':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in entries],'total':total,'page':page,'pages':max(1,(total+size-1)//size)}
 
 
 def escape_like(q):
@@ -652,9 +817,9 @@ def add_entry(data:NewEntry,u:User=Depends(current),db:Session=Depends(get_db)):
     account_locked(db,u.id)
     category_for(db,u,data.category_id,data.kind,True)
     e=Entry(user_id=u.id,title=data.title.strip(),kind=data.kind,amount=amount,category_id=data.category_id,note=data.note.strip(),occurred_on=data.occurred_on)
-    db.add(e);db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'entry_added',f'{e.kind} #{e.id}: {e.amount}')
-    db.commit();return {'id':e.id,'ok':True}
+    db.add(e);db.flush();auto_paid=allocate_income_to_debts(db,u.id,e);ensure_nonnegative(db,u.id)
+    log(db,u.id,'entry_added',f'{e.kind} #{e.id}: {e.amount}; debt_paid={auto_paid}')
+    db.commit();return {'id':e.id,'ok':True,'debt_paid':auto_paid}
 
 
 @app.put('/api/transactions/{entry_id}')
@@ -665,9 +830,10 @@ def edit_entry(entry_id:int,data:NewEntry,u:User=Depends(current),db:Session=Dep
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
     category_for(db,u,data.category_id,data.kind)
+    reverse_entry_payments(db,u.id,e.id)
     e.title=data.title.strip();e.kind=data.kind;e.amount=data.amount;e.category_id=data.category_id;e.note=data.note.strip();e.occurred_on=data.occurred_on
-    db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'entry_edited',f'#{e.id}');db.commit();return {'ok':True}
+    db.flush();auto_paid=allocate_income_to_debts(db,u.id,e);ensure_nonnegative(db,u.id)
+    log(db,u.id,'entry_edited',f'#{e.id}; debt_paid={auto_paid}');db.commit();return {'ok':True,'debt_paid':auto_paid}
 
 
 @app.delete('/api/transactions/{entry_id}')
@@ -675,7 +841,7 @@ def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)
     account_locked(db,u.id)
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
-    db.delete(e);db.flush();ensure_nonnegative(db,u.id)
+    reverse_entry_payments(db,u.id,e.id);db.delete(e);db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'entry_deleted',f'#{entry_id}');db.commit();return {'ok':True}
 
 
@@ -713,6 +879,9 @@ def upsert_budget(data:NewBudget,u:User=Depends(current),db:Session=Depends(get_
 def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     y,m=valid_month(month);a,b=month_bounds(month)
     balance,all_income,all_expense=current_balance(db,u.id)
+    debt_remaining=int(db.scalar(select(func.coalesce(func.sum(Debt.remaining),0)).where(Debt.user_id==u.id)) or 0)
+    debt_paid=debt_paid_total(db,u.id)
+    month_debt_paid=int(db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(DebtPayment.user_id==u.id,DebtPayment.paid_on>=a,DebtPayment.paid_on<b)) or 0)
     month_entries=list(db.scalars(select(Entry).where(Entry.user_id==u.id,Entry.occurred_on>=a,Entry.occurred_on<b)))
     inc=sum(e.amount for e in month_entries if e.kind=='income')
     exp=sum(e.amount for e in month_entries if e.kind=='expense')
@@ -732,10 +901,13 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
         trend.append({'month':key,'income':map_hist[key]['income'],'expense':map_hist[key]['expense']})
     recent=list(db.scalars(select(Entry).where(Entry.user_id==u.id).order_by(Entry.occurred_on.desc(),Entry.id.desc()).limit(6)))
     budgets=list_budgets(month,u,db)
+    ids=[e.id for e in recent]
+    allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
     return {'balance':balance,'opening_balance':u.opening_balance,'total_income':all_income,'total_expense':all_expense,
             'month_income':inc,'month_expense':exp,'month_count':len(month_entries),'net':inc-exp,
-            'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats) for e in recent],
-            'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount'])}
+            'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in recent],
+            'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
+            'debt_remaining':debt_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance-debt_remaining}
 
 
 @app.get('/api/export.csv')
@@ -747,13 +919,15 @@ def export_csv(month:str|None=None,u:User=Depends(current),db:Session=Depends(ge
     cats={c.id:c.name for c in db.scalars(select(Category).where(Category.user_id==u.id))}
     output=io.StringIO();output.write('\ufeff')
     writer=csv.writer(output)
-    writer.writerow(['Ngày','Loại','Nội dung','Danh mục','Số tiền (VNĐ)','Ghi chú'])
+    ids=[e.id for e in rows]
+    allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
+    writer.writerow(['Ngày','Loại','Nội dung','Danh mục','Số tiền (VNĐ)','Ghi chú','Đã tự động trả nợ (VNĐ)'])
     for e in rows:
         # Prevent spreadsheet formula injection for arbitrary user-provided strings.
         def excel_text(value):
             value=str(value)
             return "'"+value if value.lstrip().startswith(('=','+','-','@','\t','\r')) else value
-        writer.writerow([e.occurred_on.isoformat(),'Thu' if e.kind=='income' else 'Chi',excel_text(e.title),excel_text(cats.get(e.category_id,'')),e.amount,excel_text(e.note)])
+        writer.writerow([e.occurred_on.isoformat(),'Thu' if e.kind=='income' else 'Chi',excel_text(e.title),excel_text(cats.get(e.category_id,'')),e.amount,excel_text(e.note),int(allocations.get(e.id,0))])
     content=output.getvalue().encode('utf-8')
     return Response(content=content,media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="moneyflow-{month or "tat-ca"}.csv"'})
 
@@ -829,6 +1003,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(AuthSession).filter(AuthSession.user_id==target.id).delete(synchronize_session=False)
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id==target.id).delete(synchronize_session=False)
     db.query(Budget).filter(Budget.user_id==target.id).delete(synchronize_session=False)
+    db.query(DebtPayment).filter(DebtPayment.user_id==target.id).delete(synchronize_session=False)
+    db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
     db.query(Category).filter(Category.user_id==target.id).delete(synchronize_session=False)
     db.query(Audit).filter(Audit.actor_id==target.id).update({Audit.actor_id:None},synchronize_session=False)

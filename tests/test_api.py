@@ -193,3 +193,95 @@ def test_brand_assets_and_https_local_link(client, monkeypatch):
     monkeypatch.setenv('SMTP_FROM','moneyflow@example.com')
     monkeypatch.setattr(app_module.smtplib, 'SMTP',lambda *args,**kwargs:FakeSMTP())
     app_module.send_reset_email('user@example.com','sample')
+
+
+def test_debts_auto_repayment_and_consistency(client):
+    """New income repays oldest debts first, while the ledger remains reversible."""
+    # Authenticate owner and create a distinct profile with no previous balance.
+    r=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert r.status_code==200,r.text
+    admin_csrf=r.json()['csrf_token']
+    r=auth_post(client,'/api/users',credentials('debtor'),csrf=admin_csrf)
+    assert r.status_code==200,r.text
+    r=auth_post(client,'/api/login',{'username':'debtor','password':'SecurePassword@12345'})
+    assert r.status_code==200,r.text
+    csrf=r.json()['csrf_token']
+    categories=client.get('/api/categories').json()
+    inc=next(c for c in categories if c['kind']=='income')
+    exp=next(c for c in categories if c['kind']=='expense')
+    base={'name':'No goc 1','lender':'Ngan hang','principal':1_000_000,'due_date':None,'note':''}
+    assert auth_post(client,'/api/debts',base).status_code==403
+    d1=auth_post(client,'/api/debts',base,csrf=csrf)
+    assert d1.status_code==200,d1.text
+    id1=d1.json()['id']
+    d2=auth_post(client,'/api/debts',{**base,'name':'No goc 2','principal':500_000},csrf=csrf)
+    assert d2.status_code==200,d2.text
+    id2=d2.json()['id']
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==0
+    def income(amount):
+        return {'title':'Thu nhap', 'kind':'income','amount':amount,'category_id':inc['id'], 'occurred_on':'2026-11-02','note':''}
+    def spend(amount):
+        return {'title':'Mua hang', 'kind':'expense','amount':amount,'category_id':exp['id'], 'occurred_on':'2026-11-02','note':''}
+    r=auth_post(client,'/api/transactions',income(1_200_000),csrf=csrf)
+    assert r.status_code==200,r.text
+    first_id=r.json()['id']
+    assert r.json()['debt_paid']==1_200_000
+    d=client.get('/api/debts').json()
+    assert (d['total_remaining'],d['total_paid'])==(300_000,1_200_000)
+    assert [p['debt_id'] for p in sorted(d['payments'],key=lambda p:p['id'])]==[id1,id2]
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==0
+    r=auth_post(client,'/api/transactions',income(500_000),csrf=csrf)
+    assert r.status_code==200,r.text
+    second_id=r.json()['id']
+    assert r.json()['debt_paid']==300_000
+    dashboard=client.get('/api/dashboard?month=2026-11').json()
+    assert (dashboard['balance'],dashboard['debt_remaining'],dashboard['debt_paid'],dashboard['month_income']) == (200_000,0,1_500_000,1_700_000)
+    assert auth_post(client,'/api/transactions',spend(200_001),csrf=csrf).status_code==409
+    assert auth_post(client,'/api/transactions',spend(80_000),csrf=csrf).status_code==200
+    # Editing an income reverses only that income's earlier allocation and reapplies it.
+    assert auth_post(client,f'/api/transactions/{second_id}',income(350_000),csrf=csrf,method='put').status_code==409
+    r=auth_post(client,f'/api/transactions/{second_id}',income(400_000),csrf=csrf,method='put')
+    assert r.status_code==200,r.text
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==20_000
+    assert client.get('/api/debts').json()['total_remaining']==0
+    # Undo income: it should restore the debt it paid; the 80,000 expense
+    # would then cause an overdraft, so the whole operation must roll back.
+    r=auth_post(client,f'/api/transactions/{second_id}',csrf=csrf,method='delete')
+    assert r.status_code==409,r.text
+    assert client.get('/api/debts').json()['total_remaining']==0
+    # Remove expense and delete income, so the debt is restored atomically.
+    expense_id=client.get('/api/transactions?kind=expense').json()['items'][0]['id']
+    assert auth_post(client,f'/api/transactions/{expense_id}',csrf=csrf,method='delete').status_code==200
+    assert auth_post(client,f'/api/transactions/{second_id}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/debts').json()['total_remaining']==300_000
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==0
+    assert auth_post(client,f'/api/debts/{id1}',csrf=csrf,method='delete').status_code==409
+    # A new loan is not retroactively paid by income entered before it existed.
+    new=auth_post(client,'/api/debts',{**base,'name':'No moi','principal':100_000},csrf=csrf)
+    assert new.status_code==200,new.text
+    new_id=new.json()['id']
+    assert client.get('/api/debts').json()['total_remaining']==400_000
+    # Dedicated manual payment lowers both available balance and principal.
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':60_000},csrf=csrf,method='put').status_code==200
+    r=auth_post(client,f'/api/debts/{new_id}/payments',{'amount':30_000,'paid_on':'2026-11-02'},csrf=csrf)
+    assert r.status_code==200,r.text
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==30_000
+    assert client.get('/api/debts').json()['total_remaining']==370_000
+    assert auth_post(client,f'/api/debts/{new_id}/payments',{'amount':31_000,'paid_on':'2026-11-02'},csrf=csrf).status_code==409
+    manual=next(p for p in client.get('/api/debts').json()['payments'] if p['mode']=='manual')
+    assert auth_post(client,f'/api/debt-payments/{manual["id"]}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==60_000
+    assert client.get('/api/debts').json()['total_remaining']==400_000
+    # User isolation: another user cannot edit the debtor's debt.
+    login_other=auth_post(client,'/api/login',{'username':'member','password':'ResetStrong@2026AB'})
+    assert login_other.status_code==200,login_other.text
+    other_csrf=client.get('/api/me').json()['csrf_token']
+    assert auth_post(client,f'/api/debts/{new_id}/payments',{'amount':1},csrf=other_csrf).status_code==404
+    # Admin deletion removes debts and debt-payment dependents before entries.
+    login_admin=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert login_admin.status_code==200
+    admin_csrf=login_admin.json()['csrf_token']
+    r=auth_post(client,'/api/users',{'username':'noop'},csrf=admin_csrf)
+    assert r.status_code==422
+    debtor=next(u for u in client.get('/api/users').json() if u['username']=='debtor')
+    assert auth_post(client,f"/api/users/{debtor['id']}",{'confirm_username':'debtor'},csrf=admin_csrf,method='delete').status_code==200

@@ -55,6 +55,9 @@ $allowed = @('.gitignore', '.dockerignore', '.env.example', 'Dockerfile', 'Docke
              'scripts', 'tests', '.github', 'preview')
 $legacyDocs = @('CHANGELOG.md', 'UPGRADE-TO-v1.0.1.md',
                 'UPGRADE-TO-v1.0.2.md', 'UPGRADE-TO-v1.0.3.md')
+Write-Host 'Docker preflight (auto-start when needed)...' -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot 'ensure-docker.ps1')
+if (-not $?) { throw 'Docker Engine chua san sang; publishing stopped.' }
 Write-Host '[1/6] Isolated API tests and frontend syntax...' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'test.ps1')
 if (-not $?) { throw 'Tests failed; nothing pushed.' }

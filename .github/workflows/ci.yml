@@ -18,6 +18,18 @@ jobs:
         run: |
           docker compose config --quiet
           docker run --rm -v "${{ github.workspace }}/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Check PowerShell scripts syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts -Recurse -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_.Message }
+              throw "PowerShell syntax error: $($_.FullName)"
+            }
+          }
       - name: Frontend syntax
         run: node --check frontend/app.js
       - name: Build isolated test runner

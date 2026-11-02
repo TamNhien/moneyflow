@@ -3,9 +3,8 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 
 # Apply AFTER copying v1.0.1 files into the existing project folder.
 # The PostgreSQL container is recreated on host port 5435; its internal port stays 5432.
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw 'Docker Desktop chua cai dat hoac Docker khong co trong PATH.'
-}
+& (Join-Path $PSScriptRoot 'ensure-docker.ps1')
+if (-not $?) { throw 'Docker Engine chua san sang.' }
 $envPath = Join-Path (Get-Location) '.env'
 if (-not (Test-Path $envPath)) {
     [IO.File]::WriteAllText($envPath, "DB_PASSWORD=moneyflow`n", (New-Object System.Text.UTF8Encoding($false)))
