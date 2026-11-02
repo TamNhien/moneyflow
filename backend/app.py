@@ -251,8 +251,17 @@ def normalized_email(value: str) -> str:
     return value
 
 
+def local_vietnam_phone(value: str | None) -> str:
+    """Display Vietnamese numbers as 0...; preserve other international prefixes."""
+    if not value:
+        return ''
+    compact = re.sub(r'[\s.()-]', '', value.strip())
+    match = re.fullmatch(r'(?:\+84|0084|84)([1-9][0-9]{8,9})', compact)
+    return '0' + match.group(1) if match else compact
+
+
 def normalized_phone(value: str) -> str:
-    value = re.sub(r'[ .()-]', '', value.strip())
+    value = local_vietnam_phone(value)
     if not PHONE_PATTERN.fullmatch(value):
         raise HTTPException(422, 'Số điện thoại phải gồm 9-15 chữ số, có thể bắt đầu bằng +.')
     return value
@@ -266,7 +275,7 @@ def normalized_address(value: str) -> str:
 
 
 def user_json(u):
-    return {'id':u.id,'username':u.username,'email':u.email or '', 'phone':u.phone or '',
+    return {'id':u.id,'username':u.username,'email':u.email or '', 'phone':local_vietnam_phone(u.phone),
             'address':u.address or '', 'profile_complete':bool(u.email and u.phone and u.address),
             'role':u.role,'active':u.active,'opening_balance':u.opening_balance,
             'created_at':u.created_at.isoformat()}

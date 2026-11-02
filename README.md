@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.8
+# MoneyFlow Local v1.0.9
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, ngân sách, **quản lý nợ gốc** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -73,9 +73,9 @@ Giữ các volume Docker để không mất database và CA cũ. Không dùng `d
 - **Quản lý nợ:** tạo các khoản nợ gốc và người cho vay, ngày đến hạn, ghi chú; theo dõi nợ còn lại, đã trả, thanh toán thủ công và hoàn tác.
 - **Tự trừ nợ khi thu nhập mới:** khoản tiền mới được phân bổ cho nợ đang còn theo thứ tự tạo trước; chỉ phần dư mới tăng số dư. Không trừ hồi tố các giao dịch thu nhập cũ, không tính trả nợ gốc như chi phí sinh hoạt.
 - **Thống kê:** tổng thu/chi, biến động 6 tháng, biểu đồ tròn chia từ tâm theo danh mục, ngân sách, số nợ và tài sản ròng.
-- **Tài khoản:** username, email, điện thoại, địa chỉ; phân quyền Admin/Member, khóa tài khoản, nhật ký hệ thống. Tài khoản có sổ giao dịch riêng.
+- **Tài khoản:** username, email, điện thoại Việt Nam dạng `0...` (tự nhận `+84`, `84`, `0084`), địa chỉ; phân quyền Admin/Member, khóa tài khoản, nhật ký hệ thống. Tài khoản có sổ giao dịch riêng.
 - **Mật khẩu:** Argon2id với salt riêng, xác nhận mật khẩu, thanh đo độ mạnh và kiểm tra ở backend; khôi phục bằng liên kết email dùng một lần, hết hạn 15 phút khi có SMTP.
-- **Giao diện:** theme tối xanh tím, logo SVG, favicon, phù hợp desktop và điện thoại.
+- **Giao diện:** theme tối xanh tím, logo SVG, favicon, phù hợp desktop và điện thoại. Có nút **Đăng xuất** cạnh biểu tượng tài khoản tại thanh đầu trang (trên điện thoại hiển thị biểu tượng có nhãn trợ năng).
 
 ### Thư điện tử khôi phục mật khẩu
 
@@ -99,7 +99,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.8
+.\scripts\publish.ps1 -Version 1.0.9
 ```
 
 Từ lần phát hành kế tiếp, nếu phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -126,6 +126,7 @@ Từ lần phát hành kế tiếp, nếu phiên bản trước đã được ph
 | v1.0.5 | Nền tối toàn ứng dụng, pie chart chia từ tâm, logo/favicon và HTTPS nội bộ Caddy. |
 | v1.0.6 | Sửa khả năng bắt tay TLS khi truy cập HTTPS bằng IP, cấu hình SNI Caddy. |
 | v1.0.7 | Quản lý nợ gốc, tự phân bổ tiền thu để trả nợ, lịch sử thanh toán. |
-| **v1.0.8** | **Tự mở Docker Desktop khi test/build/chạy/phát hành; đợi Engine, báo lỗi có hướng xử lý và thêm lệnh chạy một bước `run.ps1`.** |
+| v1.0.8 | Tự mở Docker Desktop khi test/build/chạy/phát hành; đợi Engine và thêm lệnh `run.ps1`. |
+| **v1.0.9** | **Nút Đăng xuất cạnh tài khoản trên thanh trên cùng; hiển thị và chuẩn hóa số điện thoại Việt Nam về đầu số 0, không thay đổi dữ liệu tài chính.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

@@ -62,9 +62,15 @@ def test_full_flow(client):
     assert auth_post(client,'/api/opening-balance',{'opening_balance':0},csrf=token,method='put').status_code==200
     assert auth_post(client,'/api/transactions/'+str(inc_id),csrf=token,method='delete').status_code==200
     assert client.get('/api/dashboard?month=2026-11').json()['balance']==0
-    assert auth_post(client,'/api/users',credentials('member'),csrf=token).status_code==200
+    added = auth_post(client,'/api/users',{**credentials('member'),'phone':'+84776905506'},csrf=token)
+    assert added.status_code==200,added.text
+    assert added.json()['phone']=='0776905506'
     assert auth_post(client,'/api/users',{**credentials('another'),'email':'member@example.com'},csrf=token).status_code==409
     users=client.get('/api/users').json();member=next(x for x in users if x['username']=='member')
+    assert member['phone']=='0776905506'
+    edited=auth_post(client,f'/api/users/{member["id"]}',{'phone':'0084933445566'},csrf=token,method='put')
+    assert edited.status_code==200,edited.text
+    assert edited.json()['phone']=='0933445566'
     # Full account lifecycle and temporary brute-force protection.
     t=auth_post(client,'/api/users',credentials('trash'),csrf=token).json()
     for _ in range(5):
@@ -95,6 +101,8 @@ def test_basic_headers(client):
     resp=client.get('/')
     assert resp.status_code==200
     assert 'moneyflow' in resp.text
+    assert 'id="header-logout"' in resp.text
+    assert 'data-action="logout"' in resp.text
     assert resp.headers['x-frame-options']=='DENY'
     resp=client.post('/api/login',data='username=foo',headers={'Content-Type':'application/x-www-form-urlencoded'})
     assert resp.status_code==415
@@ -285,3 +293,18 @@ def test_debts_auto_repayment_and_consistency(client):
     assert r.status_code==422
     debtor=next(u for u in client.get('/api/users').json() if u['username']=='debtor')
     assert auth_post(client,f"/api/users/{debtor['id']}",{'confirm_username':'debtor'},csrf=admin_csrf,method='delete').status_code==200
+
+
+def test_legacy_phone_without_database_migration():
+    from backend.app import User, local_vietnam_phone, normalized_phone, user_json
+    from datetime import datetime, timezone
+    assert normalized_phone('+84 776 905 506') == '0776905506'
+    assert normalized_phone('84776905506') == '0776905506'
+    assert normalized_phone('0084776905506') == '0776905506'
+    assert normalized_phone('0776905506') == '0776905506'
+    assert normalized_phone('+12025550131') == '+12025550131'
+    assert local_vietnam_phone('+84776905506') == '0776905506'
+    # Existing PostgreSQL rows are not rewritten; API makes the old prefix readable.
+    legacy = User(username='legacy-phone', phone='+84776905506', email='legacy-phone@example.com',
+                  address='123 Nguyen Hue, Quan 1', created_at=datetime.now(timezone.utc))
+    assert user_json(legacy)['phone'] == '0776905506'
