@@ -308,3 +308,67 @@ def test_legacy_phone_without_database_migration():
     legacy = User(username='legacy-phone', phone='+84776905506', email='legacy-phone@example.com',
                   address='123 Nguyen Hue, Quan 1', created_at=datetime.now(timezone.utc))
     assert user_json(legacy)['phone'] == '0776905506'
+
+
+def test_wallets_transfer_income_expense_and_debt(client):
+    # A separate tenant avoids relying on the balances of previous tests.
+    owner=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert owner.status_code==200,owner.text
+    owner_csrf=owner.json()['csrf_token']
+    made=auth_post(client,'/api/users',credentials('walletmember'),csrf=owner_csrf)
+    assert made.status_code==200,made.text
+    member=auth_post(client,'/api/login',{'username':'walletmember','password':'SecurePassword@12345'})
+    assert member.status_code==200,member.text
+    csrf=member.json()['csrf_token']
+    w=client.get('/api/wallets').json()
+    assert len(w['items'])==1 and w['items'][0]['is_default']
+    cash_id=w['items'][0]['id']
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':1000},csrf=csrf,method='put').status_code==200
+    created=auth_post(client,'/api/wallets',{'name':'Ngân hàng VCB','kind':'bank','opening_balance':200},csrf=csrf)
+    assert created.status_code==200,created.text
+    bank_id=created.json()['id']
+    assert client.get('/api/wallets').json()['total_balance']==1200
+    transfer={'from_wallet_id':cash_id,'to_wallet_id':bank_id,'amount':600,'occurred_on':'2026-11-02','note':'Chuyển vốn'}
+    assert auth_post(client,'/api/wallet-transfers',{**transfer,'amount':1001},csrf=csrf).status_code==409
+    r=auth_post(client,'/api/wallet-transfers',transfer,csrf=csrf)
+    assert r.status_code==200,r.text
+    transfer_id=r.json()['id']
+    w=client.get('/api/wallets').json()
+    assert [(v['balance']) for v in w['items']]==[400,800]
+    dash=client.get('/api/dashboard?month=2026-11').json()
+    assert dash['balance']==1200 and dash['month_income']==0 and dash['month_expense']==0
+    cs=client.get('/api/categories').json()
+    ci=next(x['id'] for x in cs if x['kind']=='income')
+    ce=next(x['id'] for x in cs if x['kind']=='expense')
+    def transaction(kind,amount,wallet_id):
+        return {'title':'Test giao dịch','kind':kind,'amount':amount,'category_id':ci if kind=='income' else ce,'occurred_on':'2026-11-02','wallet_id':wallet_id}
+    assert auth_post(client,'/api/transactions',transaction('expense',500,cash_id),csrf=csrf).status_code==409
+    assert auth_post(client,'/api/transactions',transaction('expense',500,bank_id),csrf=csrf).status_code==200
+    assert client.get('/api/wallets').json()['total_balance']==700
+    assert auth_post(client,'/api/wallet-transfers/'+str(transfer_id),csrf=csrf,method='delete').status_code==409
+    d=auth_post(client,'/api/debts',{'name':'Nợ xe','principal':250},csrf=csrf)
+    assert d.status_code==200,d.text
+    r=auth_post(client,'/api/transactions',transaction('income',300,bank_id),csrf=csrf)
+    assert r.status_code==200 and r.json()['debt_paid']==250,r.text
+    w=client.get('/api/wallets').json()['items']
+    assert [(x['balance']) for x in w]==[400,350]
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==750
+    assert client.get('/api/debts').json()['total_remaining']==0
+    assert auth_post(client,'/api/transactions',transaction('expense',500,cash_id),csrf=csrf).status_code==409
+    # Reassigning an existing expense to the cash wallet cannot overdraw it.
+    expense_id=client.get('/api/transactions?kind=expense').json()['items'][0]['id']
+    assert auth_post(client,f'/api/transactions/{expense_id}',transaction('expense',500,cash_id),csrf=csrf,method='put').status_code==409
+    assert client.get('/api/wallets').json()['total_balance']==750
+    assert auth_post(client,f'/api/wallets/{bank_id}/toggle',csrf=csrf).status_code==409
+    assert auth_post(client,f'/api/wallets/{cash_id}/toggle',csrf=csrf).status_code==409
+    assert auth_post(client,f'/api/wallets/{bank_id}',{'name':'VCB mới','kind':'bank'},csrf=csrf,method='put').status_code==200
+    assert client.get('/api/wallets').json()['items'][1]['name']=='VCB mới'
+    csv=client.get('/api/export.csv?month=2026-11').content.decode('utf-8-sig')
+    assert 'Ví tiền' in csv and 'VCB mới' in csv
+    # Another account cannot withdraw from a wallet it does not own.
+    assert auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'}).status_code==200
+    r=client.get('/api/wallets').json()
+    assert all(w['id']!=bank_id for w in r['items'])
+    owner_csrf=client.get('/api/me').json()['csrf_token']
+    assert auth_post(client,'/api/wallet-transfers',transfer,csrf=owner_csrf).status_code==422
+    assert auth_post(client,'/api/transactions',transaction('income',100,bank_id),csrf=owner_csrf).status_code==422

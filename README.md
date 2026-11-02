@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.10
+# MoneyFlow Local v1.0.11
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, ngân sách, **quản lý nợ gốc** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -66,6 +66,16 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 
 Giữ các volume Docker để không mất database và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
 
+## v1.0.11 — Quản lý nhiều ví
+
+- Mỗi tài khoản có **Ví chính**, có thể tạo tối đa 30 ví: **Tiền mặt, Ngân hàng, Ví điện tử**. Số dư được tính độc lập từ tiền đầu kỳ, giao dịch, trả nợ và chuyển ví.
+- Màn hình **Ví & tài khoản**: xem số dư từng ví, tổng tiền, tạo ví, sửa tên/loại, khóa/mở ví khi hợp lệ, chuyển tiền và xem lịch sử.
+- Form **thu/chi** và **trả nợ thủ công** có trường chọn ví; tiền thu trả nợ tự động được khấu trừ ở chính ví nhận tiền.
+- **Chuyển ví là giao dịch nội bộ**, không làm thay đổi tổng tài sản, không tăng thu hoặc chi và không ảnh hưởng thống kê danh mục.
+- Dữ liệu cũ được chuyển vào ví chính bằng migration không phá dữ liệu (`wallets`, `wallet_transfers`, cột `wallet_id` ở `entries` và `debt_payments`). Migration chạy lại không nhân đôi ví hay số dư.
+- Không cho chuyển tiền vượt số dư; sửa/xóa giao dịch hoặc hoàn tác chuyển tiền không được làm bất kỳ ví nào âm. Không cho khóa ví còn số dư, không cho khóa ví chính.
+- **Tiền ban đầu trong Cài đặt** chỉ điều chỉnh tiền đầu kỳ Ví chính; khi tạo ví mới có thể khai báo số dư tiền đã có sẵn, hoặc nhập 0 rồi chuyển tiền từ ví cũ để tránh tính trùng.
+
 ## Chức năng
 
 - **Tiền ban đầu và số dư:** số dư = tiền gốc + tổng thu nhập − chi tiêu − tiền đã trả nợ. Chặn thao tác khiến số dư âm.
@@ -99,7 +109,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.10
+.\scripts\publish.ps1 -Version 1.0.11
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -112,13 +122,13 @@ Sau khi push `v1.0.10`, `publish.ps1` tự đợi workflow `release.yml` **đún
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.10
+.\scripts\publish.ps1 -Version 1.0.11
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
 
 ```powershell
-.\scripts\verify-release.ps1 -Version 1.0.10
+.\scripts\verify-release.ps1 -Version 1.0.11
 ```
 
 Tùy chọn thời gian chờ (mặc định 1200 giây = 20 phút):
@@ -152,5 +162,6 @@ Nếu lần phát hành đã push tag nhưng GitHub Actions bị lỗi, **không
 | v1.0.8 | Tự mở Docker Desktop khi test/build/chạy/phát hành; đợi Engine và thêm lệnh `run.ps1`. |
 | v1.0.9 | Nút Đăng xuất cạnh tài khoản; chuẩn hóa số điện thoại Việt Nam về đầu số 0. |
 | **v1.0.10** | **Theo dõi GitHub Actions đến khi hoàn thành, xác minh Release published + ZIP/SHA-256, hiển thị thông báo PowerShell và popup Windows khi thành công; lỗi hoặc timeout sẽ báo chính xác.** |
+| **v1.0.11** | **Quản lý nhiều ví tiền mặt/ngân hàng/ví điện tử, chuyển ví nội bộ không tính thu/chi, gắn thu chi và trả nợ vào từng ví, migration an toàn từ sổ cũ.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

@@ -69,6 +69,33 @@ class User(Base):
     __table_args__ = (CheckConstraint('opening_balance >= 0'),)
 
 
+class Wallet(Base):
+    __tablename__ = 'wallets'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(20), default='cash')
+    opening_balance: Mapped[int] = mapped_column(BigInteger, default=0)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('opening_balance >= 0', name='ck_wallet_opening'),)
+
+
+class WalletTransfer(Base):
+    __tablename__ = 'wallet_transfers'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    from_wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    to_wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    amount: Mapped[int] = mapped_column(BigInteger)
+    occurred_on: Mapped[date] = mapped_column(Date, index=True)
+    note: Mapped[str] = mapped_column(String(300), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('amount > 0', name='ck_transfer_positive'),
+                      CheckConstraint('from_wallet_id <> to_wallet_id', name='ck_transfer_distinct'))
+
+
 class Category(Base):
     __tablename__ = 'categories'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -88,6 +115,7 @@ class Entry(Base):
     title: Mapped[str] = mapped_column(String(120))
     amount: Mapped[int] = mapped_column(BigInteger)
     category_id: Mapped[int] = mapped_column(ForeignKey('categories.id'))
+    wallet_id: Mapped[int | None] = mapped_column(ForeignKey('wallets.id'), nullable=True, index=True)
     note: Mapped[str] = mapped_column(String(500), default='')
     occurred_on: Mapped[date] = mapped_column(Date, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -115,6 +143,7 @@ class DebtPayment(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     debt_id: Mapped[int] = mapped_column(ForeignKey('debts.id'), index=True)
     entry_id: Mapped[int | None] = mapped_column(ForeignKey('entries.id'), nullable=True, index=True)
+    wallet_id: Mapped[int | None] = mapped_column(ForeignKey('wallets.id'), nullable=True, index=True)
     amount: Mapped[int] = mapped_column(BigInteger)
     mode: Mapped[str] = mapped_column(String(10))  # auto: from an income; manual: from available balance
     paid_on: Mapped[date] = mapped_column(Date, index=True)
@@ -172,11 +201,35 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(300)'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
+            conn.execute(text('ALTER TABLE entries ADD COLUMN IF NOT EXISTS wallet_id INTEGER REFERENCES wallets(id)'))
+            conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS wallet_id INTEGER REFERENCES wallets(id)'))
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_entries_wallet_id ON entries (wallet_id)'))
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_debt_payments_wallet_id ON debt_payments (wallet_id)'))
         else:
             columns = {row[1] for row in conn.execute(text('PRAGMA table_info(users)'))}
             for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300)')]:
                 if name not in columns: conn.execute(text(f'ALTER TABLE users ADD COLUMN {name} {kind}'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
+            for table in ('entries', 'debt_payments'):
+                existing = {row[1] for row in conn.execute(text(f'PRAGMA table_info({table})'))}
+                if 'wallet_id' not in existing:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)'))
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_entries_wallet_id ON entries (wallet_id)'))
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_debt_payments_wallet_id ON debt_payments (wallet_id)'))
+    # Idempotent upgrade: create exactly one default wallet for each legacy account.
+    # Existing opening_balance, entries and debt payments are reassigned, not copied.
+    with SessionLocal.begin() as db:
+        for u in db.scalars(select(User).order_by(User.id)):
+            primary = db.scalar(select(Wallet).where(Wallet.user_id == u.id, Wallet.is_default == True).order_by(Wallet.id))
+            if primary is None:
+                primary = Wallet(user_id=u.id, name='Ví chính', kind='cash',
+                                 opening_balance=u.opening_balance or 0, is_default=True)
+                db.add(primary)
+                db.flush()
+            db.execute(text('UPDATE entries SET wallet_id = :wallet WHERE user_id = :user AND wallet_id IS NULL'),
+                       {'wallet': primary.id, 'user':u.id})
+            db.execute(text('UPDATE debt_payments SET wallet_id = :wallet WHERE user_id = :user AND wallet_id IS NULL'),
+                       {'wallet': primary.id, 'user':u.id})
     yield
 
 
@@ -293,18 +346,64 @@ def debt_paid_total(db, user_id, entry_id=None):
     return int(db.scalar(stmt) or 0)
 
 
+def default_wallet(db: Session, user_id: int) -> Wallet:
+    wallet = db.scalar(select(Wallet).where(Wallet.user_id == user_id, Wallet.is_default == True).order_by(Wallet.id))
+    if wallet is None:
+        # Handles accounts created manually or by older database tools since startup.
+        user = db.get(User, user_id)
+        wallet = Wallet(user_id=user_id, name='Ví chính',kind='cash',
+                        opening_balance=user.opening_balance or 0, is_default=True)
+        db.add(wallet)
+        db.flush()
+    return wallet
+
+
+def wallet_for(db: Session, user_id: int, wallet_id: int | None = None, require_active: bool = False) -> Wallet:
+    wallet = default_wallet(db,user_id) if wallet_id is None else db.scalar(
+        select(Wallet).where(Wallet.user_id == user_id, Wallet.id == wallet_id))
+    if wallet is None or (require_active and not wallet.active):
+        raise HTTPException(422,'Ví không tồn tại, đã khóa hoặc không thuộc tài khoản của bạn.')
+    return wallet
+
+
+def wallet_balance(db: Session, wallet: Wallet) -> int:
+    user_id, wallet_id = wallet.user_id, wallet.id
+    income = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(
+        Entry.user_id == user_id, Entry.wallet_id == wallet_id, Entry.kind == 'income')) or 0
+    expense = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(
+        Entry.user_id == user_id, Entry.wallet_id == wallet_id, Entry.kind == 'expense')) or 0
+    debt_paid = db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(
+        DebtPayment.user_id == user_id, DebtPayment.wallet_id == wallet_id)) or 0
+    incoming = db.scalar(select(func.coalesce(func.sum(WalletTransfer.amount),0)).where(
+        WalletTransfer.user_id == user_id, WalletTransfer.to_wallet_id == wallet_id)) or 0
+    outgoing = db.scalar(select(func.coalesce(func.sum(WalletTransfer.amount),0)).where(
+        WalletTransfer.user_id == user_id, WalletTransfer.from_wallet_id == wallet_id)) or 0
+    return int(wallet.opening_balance) + int(income) - int(expense) - int(debt_paid) + int(incoming) - int(outgoing)
+
+
 def current_balance(db, user_id, opening=None):
     inc = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(Entry.user_id==user_id,Entry.kind=='income')) or 0
     exp = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(Entry.user_id==user_id,Entry.kind=='expense')) or 0
-    if opening is None:
-        opening = db.scalar(select(User.opening_balance).where(User.id==user_id)) or 0
-    # Debt principal payments are cash outflows, but not ordinary expense-category spending.
-    return int(opening)+int(inc)-int(exp)-debt_paid_total(db,user_id),int(inc),int(exp)
+    wallets = list(db.scalars(select(Wallet).where(Wallet.user_id == user_id)))
+    opening_sum = sum(w.opening_balance for w in wallets)
+    if opening is not None:
+        opening_sum += int(opening) - default_wallet(db, user_id).opening_balance
+    return int(opening_sum)+int(inc)-int(exp)-debt_paid_total(db,user_id),int(inc),int(exp)
 
 
 def ensure_nonnegative(db, user_id):
-    b,_,_ = current_balance(db,user_id)
-    if b<0: raise HTTPException(409, f'Giao dịch khiến số dư âm ({b:,}đ). Vui lòng điều chỉnh số tiền.')
+    # Guard each wallet independently, not only the global sum.
+    db.flush()
+    for wallet in db.scalars(select(Wallet).where(Wallet.user_id == user_id)):
+        balance=wallet_balance(db,wallet)
+        if balance < 0:
+            raise HTTPException(409, f'Ví "{wallet.name}" không đủ tiền ({balance:,}đ).')
+
+
+def wallet_json(db: Session, wallet: Wallet) -> dict:
+    return {'id':wallet.id,'name':wallet.name,'kind':wallet.kind,'active':wallet.active,
+            'is_default':wallet.is_default,'opening_balance':wallet.opening_balance,
+            'balance':wallet_balance(db,wallet),'created_at':wallet.created_at.isoformat()}
 
 
 def allocate_income_to_debts(db, user_id, entry):
@@ -318,7 +417,7 @@ def allocate_income_to_debts(db, user_id, entry):
             break
         value = min(available, debt.remaining)
         debt.remaining -= value
-        db.add(DebtPayment(user_id=user_id,debt_id=debt.id,entry_id=entry.id,amount=value,mode='auto',paid_on=entry.occurred_on))
+        db.add(DebtPayment(user_id=user_id,debt_id=debt.id,entry_id=entry.id,wallet_id=entry.wallet_id,amount=value,mode='auto',paid_on=entry.occurred_on))
         available -= value
         paid += value
     db.flush()
@@ -414,6 +513,7 @@ class NewEntry(BaseModel):
     category_id: int
     occurred_on: date
     note: str=Field(default='',max_length=500)
+    wallet_id: int | None = None
 
 
 class Opening(BaseModel):
@@ -431,6 +531,26 @@ class NewDebt(BaseModel):
 class ManualDebtPayment(BaseModel):
     amount: int
     paid_on: date = Field(default_factory=date.today)
+    wallet_id: int | None = None
+
+
+class NewWallet(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    kind: Literal['cash','bank','ewallet'] = 'cash'
+    opening_balance: int = 0
+
+
+class EditWallet(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    kind: Literal['cash','bank','ewallet']
+
+
+class TransferWallet(BaseModel):
+    from_wallet_id: int
+    to_wallet_id: int
+    amount: int
+    occurred_on: date = Field(default_factory=date.today)
+    note: str = Field(default='', max_length=300)
 
 
 class NewCategory(BaseModel):
@@ -495,6 +615,7 @@ def setup(data:NewUser,response:Response,db:Session=Depends(get_db)):
     try:
         db.add(u);db.flush()
         seed_categories(db,u)
+        default_wallet(db,u.id)
         csrf=start_session(db,response,u)
         log(db,u.id,'setup','Khởi tạo quản trị viên')
         db.commit()
@@ -681,7 +802,7 @@ def category_for(db,u,cat_id,kind=None,require_active=False):
 
 def entry_json(e,cats,paid=0):
     c=cats.get(e.category_id)
-    return {'id':e.id,'kind':e.kind,'title':e.title,'amount':e.amount,'category_id':e.category_id,'category':c.name if c else 'Không rõ','color':c.color if c else '#7567F8','note':e.note,'occurred_on':e.occurred_on.isoformat(),'created_at':e.created_at.isoformat(),'debt_paid':paid}
+    return {'id':e.id,'kind':e.kind,'wallet_id':e.wallet_id,'title':e.title,'amount':e.amount,'category_id':e.category_id,'category':c.name if c else 'Không rõ','color':c.color if c else '#7567F8','note':e.note,'occurred_on':e.occurred_on.isoformat(),'created_at':e.created_at.isoformat(),'debt_paid':paid}
 
 
 def debt_dict(d:Debt):
@@ -701,7 +822,7 @@ def list_debts(u:User=Depends(current),db:Session=Depends(get_db)):
             'total_remaining':sum(d.remaining for d in debts),
             'total_paid':sum(d.principal-d.remaining for d in debts),
             'payments':[{'id':p.id,'debt_id':p.debt_id,'debt':names.get(p.debt_id,''),
-                         'entry_id':p.entry_id,'amount':p.amount,'mode':p.mode,
+                         'entry_id':p.entry_id,'wallet_id':p.wallet_id,'amount':p.amount,'mode':p.mode,
                          'paid_on':p.paid_on.isoformat()} for p in payments]}
 
 
@@ -748,9 +869,10 @@ def pay_debt_manual(debt_id:int,data:ManualDebtPayment,u:User=Depends(current),d
     debt=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
     if not debt:raise HTTPException(404,'Không tìm thấy khoản nợ.')
     if amount>debt.remaining:raise HTTPException(409,'Số tiền trả vượt quá nợ gốc còn lại.')
-    if amount>current_balance(db,u.id)[0]:raise HTTPException(409,'Số dư khả dụng không đủ để trả nợ.')
+    wallet = wallet_for(db,u.id,data.wallet_id,require_active=True)
+    if amount>wallet_balance(db,wallet):raise HTTPException(409,'Ví đã chọn không đủ tiền để trả nợ.')
     debt.remaining-=amount
-    db.add(DebtPayment(user_id=u.id,debt_id=debt.id,amount=amount,mode='manual',paid_on=data.paid_on))
+    db.add(DebtPayment(user_id=u.id,debt_id=debt.id,wallet_id=wallet.id,amount=amount,mode='manual',paid_on=data.paid_on))
     db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'debt_manual_payment',f'#{debt.id}: {amount}');db.commit()
     return {'ok':True,'remaining':debt.remaining}
@@ -765,6 +887,81 @@ def undo_manual_payment(payment_id:int,u:User=Depends(current),db:Session=Depend
     d=db.scalar(select(Debt).where(Debt.id==p.debt_id,Debt.user_id==u.id).with_for_update())
     d.remaining+=p.amount;db.delete(p)
     db.flush();log(db,u.id,'debt_payment_undone',f'#{payment_id}');db.commit();return {'ok':True}
+
+
+@app.get('/api/wallets')
+def list_wallets(u:User=Depends(current),db:Session=Depends(get_db)):
+    default_wallet(db,u.id)
+    wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==u.id).order_by(Wallet.id)))
+    items=[wallet_json(db,w) for w in wallets]
+    transfers=list(db.scalars(select(WalletTransfer).where(WalletTransfer.user_id==u.id).order_by(WalletTransfer.occurred_on.desc(),WalletTransfer.id.desc()).limit(100)))
+    names={w.id:w.name for w in wallets}
+    return {'items':items,'total_balance':sum(w['balance'] for w in items),
+            'transfers':[{'id':t.id,'from_wallet_id':t.from_wallet_id,'to_wallet_id':t.to_wallet_id,
+                          'from_wallet':names.get(t.from_wallet_id,''),'to_wallet':names.get(t.to_wallet_id,''),
+                          'amount':t.amount,'occurred_on':t.occurred_on.isoformat(),'note':t.note}
+                         for t in transfers]}
+
+
+@app.post('/api/wallets')
+def create_wallet(data:NewWallet,u:User=Depends(current),db:Session=Depends(get_db)):
+    name=data.name.strip()
+    if not name:raise HTTPException(422,'Tên ví không được rỗng.')
+    check_amount(data.opening_balance,zero=True)
+    account_locked(db,u.id)
+    default_wallet(db,u.id)
+    if db.scalar(select(func.count(Wallet.id)).where(Wallet.user_id==u.id)) >= 30:
+        raise HTTPException(409,'Mỗi tài khoản tối đa 30 ví.')
+    w=Wallet(user_id=u.id,name=name,kind=data.kind,opening_balance=data.opening_balance)
+    db.add(w);db.flush();log(db,u.id,'wallet_created',f'#{w.id}: {name}');db.commit()
+    return wallet_json(db,w)
+
+
+@app.put('/api/wallets/{wallet_id}')
+def edit_wallet(wallet_id:int,data:EditWallet,u:User=Depends(current),db:Session=Depends(get_db)):
+    if not data.name.strip():raise HTTPException(422,'Tên ví không được rỗng.')
+    account_locked(db,u.id)
+    w=wallet_for(db,u.id,wallet_id)
+    w.name=data.name.strip();w.kind=data.kind
+    log(db,u.id,'wallet_edited',f'#{w.id}');db.commit()
+    return wallet_json(db,w)
+
+
+@app.post('/api/wallets/{wallet_id}/toggle')
+def toggle_wallet(wallet_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    w=wallet_for(db,u.id,wallet_id)
+    if w.is_default:raise HTTPException(409,'Không thể vô hiệu hóa ví chính.')
+    if w.active and wallet_balance(db,w)!=0:raise HTTPException(409,'Chỉ có thể khóa ví khi số dư bằng 0.')
+    w.active=not w.active
+    log(db,u.id,'wallet_toggled',f'#{w.id}: {w.active}');db.commit()
+    return wallet_json(db,w)
+
+
+@app.post('/api/wallet-transfers')
+def create_wallet_transfer(data:TransferWallet,u:User=Depends(current),db:Session=Depends(get_db)):
+    amount=check_amount(data.amount)
+    if data.from_wallet_id==data.to_wallet_id:raise HTTPException(422,'Ví gửi và ví nhận phải khác nhau.')
+    if data.occurred_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
+    account_locked(db,u.id)
+    src=wallet_for(db,u.id,data.from_wallet_id,require_active=True)
+    dst=wallet_for(db,u.id,data.to_wallet_id,require_active=True)
+    if wallet_balance(db,src)<amount:raise HTTPException(409,'Ví gửi không đủ tiền.')
+    t=WalletTransfer(user_id=u.id,from_wallet_id=src.id,to_wallet_id=dst.id,
+                     amount=amount,occurred_on=data.occurred_on,note=data.note.strip())
+    db.add(t);db.flush();ensure_nonnegative(db,u.id)
+    log(db,u.id,'wallet_transfer',f'#{t.id}: {src.id}->{dst.id} {amount}');db.commit()
+    return {'ok':True,'id':t.id}
+
+
+@app.delete('/api/wallet-transfers/{transfer_id}')
+def undo_wallet_transfer(transfer_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    t=db.scalar(select(WalletTransfer).where(WalletTransfer.user_id==u.id,WalletTransfer.id==transfer_id).with_for_update())
+    if not t:raise HTTPException(404,'Không tìm thấy chuyển tiền.')
+    db.delete(t);db.flush();ensure_nonnegative(db,u.id)
+    log(db,u.id,'wallet_transfer_undone',f'#{transfer_id}');db.commit()
+    return {'ok':True}
 
 
 @app.get('/api/categories')
@@ -796,7 +993,7 @@ def toggle_category(category_id:int,u:User=Depends(current),db:Session=Depends(g
 
 
 @app.get('/api/transactions')
-def transactions(month:str|None=None,kind:str|None=None,category_id:int|None=None,q:str='',page:int=1,size:int=15,u:User=Depends(current),db:Session=Depends(get_db)):
+def transactions(month:str|None=None,kind:str|None=None,category_id:int|None=None,wallet_id:int|None=None,q:str='',page:int=1,size:int=15,u:User=Depends(current),db:Session=Depends(get_db)):
     if page<1 or size<1 or size>100:raise HTTPException(422,'Phân trang không hợp lệ.')
     stmt=select(Entry).where(Entry.user_id==u.id)
     if month:
@@ -805,6 +1002,9 @@ def transactions(month:str|None=None,kind:str|None=None,category_id:int|None=Non
         if kind not in ('income','expense'):raise HTTPException(422,'Loại giao dịch không hợp lệ.')
         stmt=stmt.where(Entry.kind==kind)
     if category_id:stmt=stmt.where(Entry.category_id==category_id)
+    if wallet_id:
+        wallet_for(db,u.id,wallet_id)
+        stmt=stmt.where(Entry.wallet_id==wallet_id)
     if q.strip():stmt=stmt.where(Entry.title.ilike(f'%{escape_like(q.strip())}%',escape='\\'))
     total=db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     entries=list(db.scalars(stmt.order_by(Entry.occurred_on.desc(),Entry.id.desc()).offset((page-1)*size).limit(size)))
@@ -825,7 +1025,8 @@ def add_entry(data:NewEntry,u:User=Depends(current),db:Session=Depends(get_db)):
     if data.occurred_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
     account_locked(db,u.id)
     category_for(db,u,data.category_id,data.kind,True)
-    e=Entry(user_id=u.id,title=data.title.strip(),kind=data.kind,amount=amount,category_id=data.category_id,note=data.note.strip(),occurred_on=data.occurred_on)
+    wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
+    e=Entry(user_id=u.id,title=data.title.strip(),kind=data.kind,amount=amount,category_id=data.category_id,wallet_id=wallet.id,note=data.note.strip(),occurred_on=data.occurred_on)
     db.add(e);db.flush();auto_paid=allocate_income_to_debts(db,u.id,e);ensure_nonnegative(db,u.id)
     log(db,u.id,'entry_added',f'{e.kind} #{e.id}: {e.amount}; debt_paid={auto_paid}')
     db.commit();return {'id':e.id,'ok':True,'debt_paid':auto_paid}
@@ -839,7 +1040,9 @@ def edit_entry(entry_id:int,data:NewEntry,u:User=Depends(current),db:Session=Dep
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
     category_for(db,u,data.category_id,data.kind)
+    wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     reverse_entry_payments(db,u.id,e.id)
+    e.wallet_id=wallet.id
     e.title=data.title.strip();e.kind=data.kind;e.amount=data.amount;e.category_id=data.category_id;e.note=data.note.strip();e.occurred_on=data.occurred_on
     db.flush();auto_paid=allocate_income_to_debts(db,u.id,e);ensure_nonnegative(db,u.id)
     log(db,u.id,'entry_edited',f'#{e.id}; debt_paid={auto_paid}');db.commit();return {'ok':True,'debt_paid':auto_paid}
@@ -858,6 +1061,8 @@ def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)
 def set_opening(data:Opening,u:User=Depends(current),db:Session=Depends(get_db)):
     check_amount(data.opening_balance,zero=True)
     locked=account_locked(db,u.id)
+    wallet=default_wallet(db,u.id)
+    wallet.opening_balance=data.opening_balance
     locked.opening_balance=data.opening_balance;db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'opening_changed',str(data.opening_balance));db.commit();return {'ok':True}
 
@@ -888,6 +1093,7 @@ def upsert_budget(data:NewBudget,u:User=Depends(current),db:Session=Depends(get_
 def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     y,m=valid_month(month);a,b=month_bounds(month)
     balance,all_income,all_expense=current_balance(db,u.id)
+    wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==u.id).order_by(Wallet.id)))
     debt_remaining=int(db.scalar(select(func.coalesce(func.sum(Debt.remaining),0)).where(Debt.user_id==u.id)) or 0)
     debt_paid=debt_paid_total(db,u.id)
     month_debt_paid=int(db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(DebtPayment.user_id==u.id,DebtPayment.paid_on>=a,DebtPayment.paid_on<b)) or 0)
@@ -912,7 +1118,7 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     budgets=list_budgets(month,u,db)
     ids=[e.id for e in recent]
     allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
-    return {'balance':balance,'opening_balance':u.opening_balance,'total_income':all_income,'total_expense':all_expense,
+    return {'balance':balance,'opening_balance':default_wallet(db,u.id).opening_balance,'total_opening_balance':sum(w.opening_balance for w in wallets),'wallet_count':len(wallets),'wallets':[wallet_json(db,w) for w in wallets],'total_income':all_income,'total_expense':all_expense,
             'month_income':inc,'month_expense':exp,'month_count':len(month_entries),'net':inc-exp,
             'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in recent],
             'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
@@ -930,13 +1136,14 @@ def export_csv(month:str|None=None,u:User=Depends(current),db:Session=Depends(ge
     writer=csv.writer(output)
     ids=[e.id for e in rows]
     allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
-    writer.writerow(['Ngày','Loại','Nội dung','Danh mục','Số tiền (VNĐ)','Ghi chú','Đã tự động trả nợ (VNĐ)'])
+    wallet_names={w.id:w.name for w in db.scalars(select(Wallet).where(Wallet.user_id==u.id))}
+    writer.writerow(['Ngày','Loại','Nội dung','Danh mục','Số tiền (VNĐ)','Ví tiền','Ghi chú','Đã tự động trả nợ (VNĐ)'])
     for e in rows:
         # Prevent spreadsheet formula injection for arbitrary user-provided strings.
         def excel_text(value):
             value=str(value)
             return "'"+value if value.lstrip().startswith(('=','+','-','@','\t','\r')) else value
-        writer.writerow([e.occurred_on.isoformat(),'Thu' if e.kind=='income' else 'Chi',excel_text(e.title),excel_text(cats.get(e.category_id,'')),e.amount,excel_text(e.note),int(allocations.get(e.id,0))])
+        writer.writerow([e.occurred_on.isoformat(),'Thu' if e.kind=='income' else 'Chi',excel_text(e.title),excel_text(cats.get(e.category_id,'')),e.amount,excel_text(wallet_names.get(e.wallet_id,'')),excel_text(e.note),int(allocations.get(e.id,0))])
     content=output.getvalue().encode('utf-8')
     return Response(content=content,media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="moneyflow-{month or "tat-ca"}.csv"'})
 
@@ -953,7 +1160,7 @@ def create_user(data:NewUser,u:User=Depends(admin),db:Session=Depends(get_db)):
              phone=normalized_phone(data.phone),address=normalized_address(data.address),
              password_hash=ph.hash(data.password),role='member')
     try:
-        db.add(new);db.flush();seed_categories(db,new);log(db,u.id,'user_created',username);db.commit()
+        db.add(new);db.flush();seed_categories(db,new);default_wallet(db,new.id);log(db,u.id,'user_created',username);db.commit()
     except IntegrityError:
         db.rollback();raise HTTPException(409,'Tên đăng nhập hoặc email đã tồn tại.')
     return user_json(new)
@@ -1015,6 +1222,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(DebtPayment).filter(DebtPayment.user_id==target.id).delete(synchronize_session=False)
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
+    db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
+    db.query(Wallet).filter(Wallet.user_id==target.id).delete(synchronize_session=False)
     db.query(Category).filter(Category.user_id==target.id).delete(synchronize_session=False)
     db.query(Audit).filter(Audit.actor_id==target.id).update({Audit.actor_id:None},synchronize_session=False)
     username=target.username

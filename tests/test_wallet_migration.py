@@ -1,0 +1,49 @@
+"""End-to-end migration test for a real pre-wallet schema (v1.0.10 compatible)."""
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+
+
+def test_legacy_wallet_migration_is_idempotent(tmp_path):
+    db_file = tmp_path / 'old_version.sqlite'
+    connection = sqlite3.connect(db_file)
+    connection.executescript('''
+      CREATE TABLE users (id INTEGER PRIMARY KEY, username VARCHAR(32), display_name VARCHAR(80), email VARCHAR(254), phone VARCHAR(20), address VARCHAR(300), password_hash TEXT NOT NULL, role VARCHAR(12), active BOOLEAN, opening_balance BIGINT NOT NULL, failed_attempts INT, locked_until DATETIME, created_at DATETIME);
+      CREATE TABLE categories (id INTEGER PRIMARY KEY, user_id INTEGER, name VARCHAR(60), kind VARCHAR(10), color VARCHAR(7), active BOOLEAN);
+      CREATE TABLE entries (id INTEGER PRIMARY KEY, user_id INTEGER,kind VARCHAR(10),title VARCHAR(120),amount BIGINT,category_id INT,note VARCHAR(500),occurred_on DATE,created_at DATETIME);
+      CREATE TABLE debts (id INTEGER PRIMARY KEY,user_id INTEGER,name VARCHAR(120),lender VARCHAR(120),principal BIGINT,remaining BIGINT,due_date DATE,note VARCHAR(500),created_at DATETIME);
+      CREATE TABLE debt_payments (id INTEGER PRIMARY KEY,user_id INTEGER,debt_id INTEGER,entry_id INTEGER,amount BIGINT,mode VARCHAR(10),paid_on DATE,created_at DATETIME);
+      INSERT INTO users (id,username,display_name,password_hash,role,active,opening_balance,failed_attempts,created_at)
+        VALUES(20,'legacy','Legacy','hash','member',1,100000,0,'2026-01-01');
+      INSERT INTO categories (id,user_id,name,kind,color,active)
+        VALUES (1,20,'Lương','income','#777777',1),(2,20,'Ăn uống','expense','#888888',1);
+      INSERT INTO entries (id,user_id,kind,title,amount,category_id,note,occurred_on,created_at)
+        VALUES (11,20,'income','Salary',20000,1,'','2026-01-02','2026-01-02'),
+               (12,20,'expense','Food',10000,2,'','2026-01-03','2026-01-03');
+      INSERT INTO debts(id,user_id,name,principal,remaining,created_at)
+        VALUES(4,20,'Loan',15000,10000,'2026-01-01');
+      INSERT INTO debt_payments (id,user_id,debt_id,entry_id,amount,mode,paid_on,created_at)
+        VALUES(6,20,4,11,5000,'auto','2026-01-02','2026-01-02');
+    ''')
+    connection.commit()
+    connection.close()
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, 'DATABASE_URL': 'sqlite:///' + str(db_file), 'PYTHONPATH': str(root)}
+    script = '''from fastapi.testclient import TestClient
+from backend.app import app, SessionLocal, Wallet, Entry, DebtPayment, wallet_balance, current_balance
+from sqlalchemy import select
+with TestClient(app):
+ with SessionLocal() as db:
+  wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==20)))
+  assert len(wallets)==1 and wallets[0].is_default and wallets[0].opening_balance==100000
+  assert all(e.wallet_id==wallets[0].id for e in db.scalars(select(Entry)))
+  assert all(p.wallet_id==wallets[0].id for p in db.scalars(select(DebtPayment)))
+  assert wallet_balance(db,wallets[0])==105000
+  assert current_balance(db,20)[0]==105000
+'''
+    for _ in range(2):
+        result = subprocess.run([sys.executable, '-c', script], cwd=root,
+                                env=env, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + '\n' + result.stderr
