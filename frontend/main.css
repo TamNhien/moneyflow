@@ -313,3 +313,26 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .debt-explainer b{color:#dfdefe}
 @media(max-width:1150px){.debt-summary-four{grid-template-columns:repeat(2,minmax(0,1fr))}.debt-summary-four .debt-due{grid-column:auto}}
 @media(max-width:620px){.debt-summary-four{grid-template-columns:1fr}.debt-loan-meta{margin-top:0}}
+
+/* v1.0.14: recurring rules and in-app reminders, dark theme */
+.schedule-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:20px}
+.schedule-kpi{background:#18243e;border:1px solid #303f61;border-radius:16px;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.schedule-kpi small{color:#a3b6d9;font-weight:600}.schedule-kpi strong{font-size:28px;color:#eceeff}
+.schedule-section{margin-top:20px}.schedule-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.schedule-card{background:#14203a;border:1px solid #324261;border-radius:15px;padding:20px;min-width:0}
+.schedule-card h3{margin:12px 0 7px;font-size:17px;color:#f3f5ff;overflow-wrap:anywhere}
+.schedule-card p{color:#a0b3d3;font-size:13px;margin:10px 0}
+.schedule-money{font-size:24px;font-weight:800}.schedule-money.income{color:#53dfb7}.schedule-money.expense{color:#ff93a6}
+.schedule-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.schedule-pill{border-radius:999px;background:#263252;color:#cbd4ee;padding:5px 10px;font-size:11px;font-weight:700;display:inline-block;white-space:nowrap}
+.schedule-pill.overdue{background:rgba(255,107,136,.17);color:#ff93a6}
+.schedule-pill.today{background:rgba(250,192,95,.16);color:#faca72}
+.schedule-date{margin:13px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:#b6c5e5;font-size:12px}
+.schedule-date b{color:#fff}.schedule-caption{font-size:12px;color:#a0b3d3}
+.schedule-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+.reminder-stack{display:grid;gap:9px}.reminder-item{display:flex;align-items:center;gap:14px;padding:13px 15px;border-radius:12px;background:#15213b;border:1px solid #2d3b5a;min-width:0}
+.reminder-symbol{width:38px;height:38px;display:grid;place-items:center;flex-shrink:0;border-radius:11px;color:#a99aff;background:#292a59;font-weight:bold}
+.reminder-copy{flex:1;min-width:0}.reminder-copy strong{display:block;color:#edf1ff;font-size:13px;overflow-wrap:anywhere}.reminder-copy small{display:block;color:#9eb0d0;margin-top:4px}
+.reminder-count{margin-left:auto;border-radius:12px;background:#6f5dea;color:#fff;font-size:10px;font-weight:800;padding:2px 7px}
+.reminder-dashboard{margin-top:20px}
+@media(max-width:740px){.schedule-summary{grid-template-columns:1fr;gap:8px}.schedule-grid{grid-template-columns:1fr}.reminder-item{gap:9px;padding:11px}.schedule-kpi{padding:13px 16px}}

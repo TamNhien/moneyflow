@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.13
+# MoneyFlow Local v1.0.14
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -66,6 +66,23 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 
 Giữ các volume Docker để không mất database và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
 
+## v1.0.14 — Giao dịch định kỳ và nhắc lịch trong ứng dụng
+
+- **Lịch định kỳ:** tạo tối đa 100 lịch thu/chi riêng cho mỗi tài khoản; chọn ví, danh mục, số tiền, ngày bắt đầu, nhịp hằng ngày/tuần/tháng/năm, số ngày báo trước (0–30). Các tháng không đủ ngày được tự điều chỉnh (31/1 → 28/2 → 31/3). Có sửa nội dung, số tiền, ví, danh mục; tạm dừng/kích hoạt lịch; xóa lịch nếu chưa có lịch sử xử lý.
+- **Xác nhận trước khi ghi (mặc định):** tại **Định kỳ & nhắc lịch**, nhấn *Ghi giao dịch* khi đến ngày để cập nhật số dư; có thể chọn *Bỏ qua kỳ* mà không ảnh hưởng số dư. Trạng thái kỳ đã xử lý và liên kết giao dịch được ghi trong `recurring_runs`.
+- **Chế độ tự ghi (tùy chọn):** tác vụ chạy trong FastAPI mỗi 60 giây khi container hoạt động. Khi khởi động lại, xử lý các kỳ còn đến hạn theo thứ tự (giới hạn 30 kỳ/lịch mỗi lượt), chống ghi trùng bằng unique constraint, khóa hàng ở PostgreSQL và transaction. Khoản chi thiếu tiền hoặc ví bị khóa sẽ không ghi và giữ kỳ đến hạn để xem xét lại; không tạo lệnh chuyển tiền ngân hàng bên ngoài.
+- **Tương tác với quản lý nợ:** tiền thu định kỳ sử dụng cùng hàm phân bổ nợ **phải trả** như thu nhập thường. Khi tiền thu không đủ thanh toán hết nợ thì số dư khả dụng chỉ tăng phần còn lại; nợ **phải thu** không tự giảm.
+- **Thông báo nội bộ:** menu hiển thị số lịch/khoản nợ cần chú ý; dashboard và màn hình định kỳ có danh sách hạn sắp tới/trễ hạn. Lịch định kỳ dùng số ngày báo trước do người dùng chọn; trả góp/nợ nhắc trước 7 ngày. Không có thông báo push hay email tự động ở bản này; muốn thấy nhắc nhở phải mở ứng dụng.
+- **Lịch sử an toàn:** một kỳ chỉ được ghi một lần kể cả khi app khởi động lại. Nếu xóa giao dịch định kỳ đã ghi, lịch sử chuyển sang trạng thái “giao dịch đã xóa”, không tự tạo lại kỳ đó. Không ảnh hưởng dữ liệu đang có trong `entries`, `wallets` và `debts`.
+- **Database:** thêm hai bảng mới `recurring_rules` và `recurring_runs`, tạo không phá dữ liệu qua `Base.metadata.create_all`. Giao dịch trước đây không được đưa vào các lịch mới hoặc ghi hồi tố khi tạo lịch.
+
+### Giới hạn vận hành lịch
+
+- Lịch tự ghi chỉ thực hiện khi Docker Desktop, PostgreSQL và FastAPI đang chạy; việc khởi động máy tính không tự mở ứng dụng nếu người dùng chưa khởi chạy MoneyFlow. Ngày hẹn sử dụng múi giờ `Asia/Ho_Chi_Minh` từ cấu hình container.
+- Tự động **ghi vào sổ thu chi nội bộ**, không tự chuyển khoản ngân hàng, không gửi thông báo qua SMS/email và không tạo tiền nếu không có ví hợp lệ.
+- Nếu đổi một lịch từ thủ công sang tự động, những kỳ còn tồn đọng đã đến hạn có thể được tự động ghi; cần kiểm tra và bỏ qua kỳ không cần ghi trước khi chuyển chế độ.
+- Các thao tác chi, sửa và xóa vẫn phải giữ số dư từng ví không âm. Kiểm thử local sử dụng SQLite; cần xác minh tác vụ chạy nền và khóa hàng PostgreSQL trên Docker Windows khi triển khai.
+
 ## v1.0.13 — Sửa lỗi tải trang và kiểm thử giao diện tự động
 
 - Khôi phục các hàm `refreshCategories`, `refreshWallets`, `walletName`, `renderUsers` và `renderAudit` bị thiếu trong JavaScript v1.0.12. Thiếu hàm đã khiến Tổng quan báo `refreshCategories is not defined`, đồng thời ảnh hưởng các trang Giao dịch, Ví, Người dùng và Nhật ký.
@@ -100,6 +117,7 @@ Giữ các volume Docker để không mất database và CA cũ. Không dùng `d
 - **Giao dịch thu/chi:** thêm, sửa, xóa, lọc theo tháng, danh mục; xuất CSV UTF-8 BOM.
 - **Quản lý nợ:** nợ phải trả/phải thu, người vay/cho vay, lịch trả góp, lãi suất ước tính, lịch sử gốc và lãi thực tế; có thu hồi/trả thủ công và hoàn tác khi hợp lệ.
 - **Tự trừ nợ khi thu nhập mới:** khoản tiền mới chỉ phân bổ trả **nợ phải trả** theo thứ tự tạo trước; phần dư mới tăng số dư. Không trừ hồi tố các giao dịch thu nhập cũ, không tính trả nợ gốc như chi phí sinh hoạt.
+- **Giao dịch định kỳ và nhắc lịch:** lịch lương, tiền nhà, điện nước theo ngày/tuần/tháng/năm; xác nhận thủ công hoặc tự ghi, nhắc sắp đến hạn; lịch sử kỳ đã xử lý.
 - **Thống kê:** tổng thu/chi, biến động 6 tháng, biểu đồ tròn chia từ tâm theo danh mục, ngân sách, số nợ và tài sản ròng.
 - **Tài khoản:** username, email, điện thoại Việt Nam dạng `0...` (tự nhận `+84`, `84`, `0084`), địa chỉ; phân quyền Admin/Member, khóa tài khoản, nhật ký hệ thống. Tài khoản có sổ giao dịch riêng.
 - **Mật khẩu:** Argon2id với salt riêng, xác nhận mật khẩu, thanh đo độ mạnh và kiểm tra ở backend; khôi phục bằng liên kết email dùng một lần, hết hạn 15 phút khi có SMTP.
@@ -127,7 +145,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.13
+.\scripts\publish.ps1 -Version 1.0.14
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -140,13 +158,13 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.13
+.\scripts\publish.ps1 -Version 1.0.14
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
 
 ```powershell
-.\scripts\verify-release.ps1 -Version 1.0.13
+.\scripts\verify-release.ps1 -Version 1.0.14
 ```
 
 Tùy chọn thời gian chờ (mặc định 1200 giây = 20 phút):
@@ -183,5 +201,6 @@ Nếu lần phát hành đã push tag nhưng GitHub Actions bị lỗi, **không
 | v1.0.11 | Quản lý nhiều ví tiền mặt/ngân hàng/ví điện tử, chuyển ví nội bộ không tính thu/chi, gắn thu chi và trả nợ vào từng ví, migration an toàn từ sổ cũ. |
 | **v1.0.12** | **Phân loại nợ phải trả/phải thu; thu hồi theo ví; nhập lãi thực tế; lịch trả góp và lãi ước tính; bảo vệ tính toàn vẹn dòng tiền và migration dữ liệu nợ cũ.** |
 | **v1.0.13** | **Sửa các hàm frontend bị thiếu khiến trang Tổng quan trống; khôi phục toàn bộ màn hình Ví, Người dùng và Nhật ký; bổ sung kiểm thử tự động 9 màn hình trong PowerShell và GitHub Actions.** |
+| **v1.0.14** | **Thu/chi định kỳ theo ví, chế độ xác nhận hoặc tự ghi, lịch sử chống trùng, nhắc trước hạn cho lịch và nợ, dashboard nhận thông báo, 10 màn hình frontend và 12 kiểm thử API/migration.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

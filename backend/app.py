@@ -1,5 +1,7 @@
 """MoneyFlow local-first finance application API (single-origin FastAPI)."""
 import csv
+import asyncio
+import logging
 import hashlib
 import io
 import json
@@ -168,6 +170,40 @@ class Budget(Base):
     __table_args__ = (UniqueConstraint('user_id','category_id','year','month',name='uq_budget_month'), CheckConstraint('amount >= 0'))
 
 
+class RecurringRule(Base):
+    """Scheduled income/expense. One calendar occurrence is processed at most once."""
+    __tablename__ = 'recurring_rules'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey('categories.id'))
+    title: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(10))
+    amount: Mapped[int] = mapped_column(BigInteger)
+    note: Mapped[str] = mapped_column(String(500), default='')
+    frequency: Mapped[str] = mapped_column(String(10))
+    start_on: Mapped[date] = mapped_column(Date)
+    next_index: Mapped[int] = mapped_column(Integer, default=0)
+    mode: Mapped[str] = mapped_column(String(10), default='manual')
+    remind_days: Mapped[int] = mapped_column(Integer, default=3)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('amount > 0', name='ck_recurring_amount_positive'),
+                      CheckConstraint('next_index >= 0', name='ck_recurring_index_nonnegative'),)
+
+
+class RecurringRun(Base):
+    __tablename__ = 'recurring_runs'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    rule_id: Mapped[int] = mapped_column(ForeignKey('recurring_rules.id'), index=True)
+    due_on: Mapped[date] = mapped_column(Date)
+    entry_id: Mapped[int | None] = mapped_column(ForeignKey('entries.id'), nullable=True)
+    status: Mapped[str] = mapped_column(String(12))  # posted, skipped, deleted
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint('rule_id','due_on', name='uq_recurring_once'),)
+
+
 class AuthSession(Base):
     __tablename__ = 'auth_sessions'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -248,7 +284,15 @@ async def lifespan(_app: FastAPI):
                        {'wallet': primary.id, 'user':u.id})
             db.execute(text('UPDATE debt_payments SET wallet_id = :wallet WHERE user_id = :user AND wallet_id IS NULL'),
                        {'wallet': primary.id, 'user':u.id})
-    yield
+    worker = asyncio.create_task(recurring_scheduler())
+    try:
+        yield
+    finally:
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title='MoneyFlow API', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -614,6 +658,29 @@ class TransferWallet(BaseModel):
     amount: int
     occurred_on: date = Field(default_factory=date.today)
     note: str = Field(default='', max_length=300)
+
+
+class NewRecurring(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    kind: Literal['income','expense']
+    amount: int
+    category_id: int
+    wallet_id: int
+    note: str = Field(default='', max_length=500)
+    frequency: Literal['daily','weekly','monthly','yearly'] = 'monthly'
+    start_on: date = Field(default_factory=date.today)
+    mode: Literal['manual','auto'] = 'manual'
+    remind_days: int = Field(default=3, ge=0, le=30)
+
+
+class EditRecurring(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    amount: int
+    category_id: int
+    wallet_id: int
+    note: str = Field(default='', max_length=500)
+    mode: Literal['manual','auto'] = 'manual'
+    remind_days: int = Field(default=3, ge=0, le=30)
 
 
 class NewCategory(BaseModel):
@@ -1072,6 +1139,224 @@ def undo_wallet_transfer(transfer_id:int,u:User=Depends(current),db:Session=Depe
     return {'ok':True}
 
 
+# v1.0.14 - Periodic rules, idempotent posting and local reminders.
+# No external email or background cloud process. Scheduler works while FastAPI is running.
+RECURRENCE_STEPS = {'daily': 1, 'weekly': 7, 'monthly': 1, 'yearly': 12}
+
+
+def scheduled_date(rule: RecurringRule) -> date:
+    i = rule.next_index
+    if rule.frequency == 'daily':
+        return rule.start_on + timedelta(days=i)
+    if rule.frequency == 'weekly':
+        return rule.start_on + timedelta(weeks=i)
+    if rule.frequency in ('monthly', 'yearly'):
+        return add_months_clamped(rule.start_on, i * (12 if rule.frequency == 'yearly' else 1))
+    raise ValueError('Tần suất không hợp lệ.')
+
+
+def recurring_json(db: Session, rule: RecurringRule) -> dict:
+    return {'id':rule.id,'title':rule.title,'kind':rule.kind,'amount':rule.amount,
+            'category_id':rule.category_id,'wallet_id':rule.wallet_id,'note':rule.note,
+            'frequency':rule.frequency,'start_on':rule.start_on.isoformat(),
+            'next_due':scheduled_date(rule).isoformat(),'mode':rule.mode,
+            'remind_days':rule.remind_days,'active':rule.active,'processed_count':rule.next_index}
+
+
+def post_recurring_once(db: Session, rule: RecurringRule, due: date, skip=False) -> dict:
+    """Called only in a write transaction after locking a rule (on PostgreSQL).
+
+    entry and run are committed together; rollback on insufficient balance or errors.
+    """
+    if scheduled_date(rule) != due:
+        raise HTTPException(409, 'Lịch đã thay đổi, vui lòng tải lại.')
+    if due > date.today():
+        raise HTTPException(409, 'Chưa tới ngày của kỳ thanh toán.')
+    if not rule.active:
+        raise HTTPException(409, 'Lịch đang tạm dừng.')
+    owner=db.get(User,rule.user_id)
+    if owner is None or not owner.active:
+        raise HTTPException(409, 'Tài khoản đang bị khóa hoặc không tồn tại.')
+    existing = db.scalar(select(RecurringRun).where(RecurringRun.rule_id == rule.id, RecurringRun.due_on == due))
+    if existing:
+        raise HTTPException(409, 'Kỳ này đã được xử lý.')
+    entry_id = None
+    auto_paid = 0
+    if not skip:
+        # Existing business rules: pay only *payable* debt principal from new income.
+        category_for(db, db.get(User,rule.user_id), rule.category_id,rule.kind,True)
+        wallet_for(db,rule.user_id,rule.wallet_id,True)
+        e = Entry(user_id=rule.user_id, title=rule.title,kind=rule.kind,amount=rule.amount,
+                  wallet_id=rule.wallet_id,category_id=rule.category_id, note=rule.note,
+                  occurred_on=due)
+        db.add(e)
+        db.flush()
+        auto_paid=allocate_income_to_debts(db,rule.user_id,e)
+        ensure_nonnegative(db,rule.user_id)
+        entry_id=e.id
+    db.add(RecurringRun(user_id=rule.user_id,rule_id=rule.id,due_on=due,
+                        entry_id=entry_id,status='skipped' if skip else 'posted'))
+    rule.next_index+=1
+    log(db,rule.user_id,'recurring_skipped' if skip else 'recurring_posted',
+        f'#{rule.id} {due.isoformat()}; entry={entry_id}; debt_paid={auto_paid}')
+    db.flush()
+    return {'ok':True,'entry_id':entry_id,'due_on':due.isoformat(),'debt_paid':auto_paid}
+
+
+def process_auto_recurring():
+    """Runs outside HTTP in a dedicated session; incomplete payments are retried later.
+
+    A row lock protects cursor advancement under concurrent scheduler/HTTP calls.
+    Do not catch financial exceptions inside the transaction: rollback all postings.
+    """
+    with SessionLocal() as db:
+        ids=list(db.scalars(select(RecurringRule.id).where(
+            RecurringRule.active == True, RecurringRule.mode == 'auto').order_by(RecurringRule.id)))
+    for rule_id in ids:
+        for _ in range(30):  # bounded catch-up per tick, no unlimited loop
+            try:
+                with SessionLocal.begin() as db:
+                    rule=db.scalar(select(RecurringRule).where(RecurringRule.id == rule_id).with_for_update())
+                    if not rule or not rule.active or rule.mode!='auto':
+                        break
+                    due=scheduled_date(rule)
+                    if due > date.today():
+                        break
+                    post_recurring_once(db,rule,due)
+            except HTTPException as exc:
+                logging.getLogger('moneyflow.recurring').warning('Lịch #%s tạm hoãn: %s',rule_id,exc.detail)
+                break
+            except IntegrityError:
+                # Unique occurrence guard in case of concurrent requests.
+                break
+            except Exception:
+                logging.getLogger('moneyflow.recurring').exception('Không xử lý được lịch #%s',rule_id)
+                break
+
+
+async def recurring_scheduler():
+    # The local app must remain running to execute automatically. If stopped,
+    # outstanding dates are processed on the next start, bounded per cycle.
+    while True:
+        try:
+            await asyncio.to_thread(process_auto_recurring)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger('moneyflow.recurring').exception('Lỗi lập lịch')
+        await asyncio.sleep(60)
+
+
+@app.get('/api/recurring')
+def list_recurring(u:User=Depends(current),db:Session=Depends(get_db)):
+    rules=list(db.scalars(select(RecurringRule).where(RecurringRule.user_id==u.id).order_by(RecurringRule.id.desc())))
+    runs=list(db.scalars(select(RecurringRun).where(RecurringRun.user_id==u.id).order_by(RecurringRun.id.desc()).limit(100)))
+    return {'items':[recurring_json(db,r) for r in rules],
+            'history':[{'id':r.id,'rule_id':r.rule_id,'due_on':r.due_on.isoformat(),
+                        'entry_id':r.entry_id,'status':r.status} for r in runs]}
+
+
+@app.post('/api/recurring')
+def create_recurring(data:NewRecurring,u:User=Depends(current),db:Session=Depends(get_db)):
+    check_amount(data.amount)
+    if not data.title.strip():raise HTTPException(422,'Nội dung không được rỗng.')
+    if data.start_on.year<2000 or data.start_on.year>2099:raise HTTPException(422,'Ngày bắt đầu không hợp lệ.')
+    if data.mode=='auto' and data.start_on<date.today():
+        raise HTTPException(422,'Lịch tự động mới phải bắt đầu từ hôm nay trở đi.')
+    account_locked(db,u.id)
+    category_for(db,u,data.category_id,data.kind,True)
+    wallet_for(db,u.id,data.wallet_id,True)
+    if (db.scalar(select(func.count()).select_from(RecurringRule).where(RecurringRule.user_id==u.id)) or 0)>=100:
+        raise HTTPException(422,'Tối đa 100 lịch định kỳ mỗi tài khoản.')
+    obj=RecurringRule(user_id=u.id,title=data.title.strip(),kind=data.kind,amount=data.amount,
+                      wallet_id=data.wallet_id,category_id=data.category_id,note=data.note.strip(),
+                      frequency=data.frequency,start_on=data.start_on,mode=data.mode,
+                      remind_days=data.remind_days)
+    db.add(obj);db.flush();log(db,u.id,'recurring_created',f'#{obj.id}')
+    db.commit();return recurring_json(db,obj)
+
+
+@app.put('/api/recurring/{rule_id}')
+def update_recurring(rule_id:int,data:EditRecurring,u:User=Depends(current),db:Session=Depends(get_db)):
+    check_amount(data.amount)
+    if not data.title.strip():raise HTTPException(422,'Nội dung không được rỗng.')
+    account_locked(db,u.id)
+    r=db.scalar(select(RecurringRule).where(RecurringRule.id==rule_id,RecurringRule.user_id==u.id).with_for_update())
+    if r is None:raise HTTPException(404,'Không tìm thấy lịch định kỳ.')
+    category_for(db,u,data.category_id,r.kind,True)
+    wallet_for(db,u.id,data.wallet_id,True)
+    for key in ('title','amount','category_id','wallet_id','note','mode','remind_days'):
+        setattr(r,key, getattr(data,key).strip() if key in ('title','note') else getattr(data,key))
+    log(db,u.id,'recurring_edited',f'#{r.id}');db.commit();return recurring_json(db,r)
+
+
+@app.post('/api/recurring/{rule_id}/toggle')
+def toggle_recurring(rule_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    r=db.scalar(select(RecurringRule).where(RecurringRule.id==rule_id,RecurringRule.user_id==u.id).with_for_update())
+    if not r:raise HTTPException(404,'Không tìm thấy lịch định kỳ.')
+    r.active=not r.active;log(db,u.id,'recurring_toggled',f'#{r.id}: {r.active}')
+    db.commit();return recurring_json(db,r)
+
+
+@app.delete('/api/recurring/{rule_id}')
+def delete_recurring(rule_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    r=db.scalar(select(RecurringRule).where(RecurringRule.id==rule_id,RecurringRule.user_id==u.id).with_for_update())
+    if not r:raise HTTPException(404,'Không tìm thấy lịch định kỳ.')
+    if db.scalar(select(RecurringRun.id).where(RecurringRun.rule_id==rule_id).limit(1)):
+        raise HTTPException(409,'Lịch đã có lịch sử. Hãy tạm dừng thay vì xóa.')
+    db.delete(r);log(db,u.id,'recurring_deleted',f'#{rule_id}');db.commit()
+    return {'ok':True}
+
+
+def complete_recurring(rule_id:int,skip:bool,u:User,db:Session):
+    account_locked(db,u.id)
+    r=db.scalar(select(RecurringRule).where(RecurringRule.id==rule_id,RecurringRule.user_id==u.id).with_for_update())
+    if not r:raise HTTPException(404,'Không tìm thấy lịch định kỳ.')
+    if r.mode != 'manual':raise HTTPException(409,'Lịch tự động do hệ thống xử lý. Hãy tạm dừng hoặc đổi chế độ.')
+    due=scheduled_date(r)
+    result=post_recurring_once(db,r,due,skip=skip)
+    db.commit();return result
+
+
+@app.post('/api/recurring/{rule_id}/confirm')
+def confirm_recurring(rule_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    return complete_recurring(rule_id,False,u,db)
+
+
+@app.post('/api/recurring/{rule_id}/skip')
+def skip_recurring(rule_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    return complete_recurring(rule_id,True,u,db)
+
+
+@app.get('/api/reminders')
+def list_reminders(u:User=Depends(current),db:Session=Depends(get_db)):
+    today_day=date.today()
+    items=[]
+    for r in db.scalars(select(RecurringRule).where(RecurringRule.user_id==u.id,RecurringRule.active==True)):
+        due=scheduled_date(r)
+        delta=(due-today_day).days
+        if delta<=r.remind_days:
+            items.append({'kind':'recurring','ref_id':r.id,'title':r.title,
+                          'direction':r.kind,'due_on':due.isoformat(),'days_left':delta,
+                          'amount':r.amount,'mode':r.mode})
+    for debt in db.scalars(select(Debt).where(Debt.user_id==u.id,Debt.remaining>0)):
+        for row in debt_schedule_rows(debt):
+            if row['principal_paid']>=row['principal'] or not row['due_date']:
+                continue
+            deadline=date.fromisoformat(row['due_date'])
+            delta=(deadline-today_day).days
+            if delta<=7:
+                items.append({'kind':'debt','ref_id':debt.id,'title':debt.name,
+                              'direction':debt.direction,'due_on':row['due_date'],
+                              'days_left':delta,'amount':row['principal']-row['principal_paid'],
+                              'period':row['period']})
+    items.sort(key=lambda r:(r['days_left'],r['kind'],r['ref_id']))
+    return {'items':items[:100], 'overdue_count':sum(1 for i in items if i['days_left']<0),
+            'upcoming_count':sum(1 for i in items if i['days_left']>=0)}
+
+
 @app.get('/api/categories')
 def list_categories(u:User=Depends(current),db:Session=Depends(get_db)):
     return [{'id':c.id,'name':c.name,'kind':c.kind,'color':c.color,'active':c.active} for c in db.scalars(select(Category).where(Category.user_id==u.id).order_by(Category.kind,Category.id))]
@@ -1161,7 +1446,10 @@ def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)
     account_locked(db,u.id)
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
-    reverse_entry_payments(db,u.id,e.id);db.delete(e);db.flush();ensure_nonnegative(db,u.id)
+    reverse_entry_payments(db,u.id,e.id)
+    for run in db.scalars(select(RecurringRun).where(RecurringRun.user_id==u.id,RecurringRun.entry_id==e.id)):
+        run.entry_id=None;run.status='deleted'
+    db.flush();db.delete(e);db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'entry_deleted',f'#{entry_id}');db.commit();return {'ok':True}
 
 
@@ -1327,6 +1615,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     # Delete dependents in FK-safe order; anonymous audit records preserve chronology.
     db.query(AuthSession).filter(AuthSession.user_id==target.id).delete(synchronize_session=False)
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id==target.id).delete(synchronize_session=False)
+    db.query(RecurringRun).filter(RecurringRun.user_id==target.id).delete(synchronize_session=False)
+    db.query(RecurringRule).filter(RecurringRule.user_id==target.id).delete(synchronize_session=False)
     db.query(Budget).filter(Budget.user_id==target.id).delete(synchronize_session=False)
     db.query(DebtPayment).filter(DebtPayment.user_id==target.id).delete(synchronize_session=False)
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)

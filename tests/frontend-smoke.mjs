@@ -57,6 +57,7 @@ const responses = {
   'dashboard': dashboard,
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
   'budgets': [], 'debts': debtData, 'users': [fakeUser],
+  'recurring': {items:[],history:[]}, 'reminders': {items:[],overdue_count:0,upcoming_count:0},
   'audit': [{ id: 1, at: '2026-11-02T10:00:00Z', actor: 'owner', action: 'login', detail: 'OK' }],
 };
 async function fetchMock(path) {
@@ -84,7 +85,7 @@ assert.match(element('#page-content').innerHTML, /Xin chào/, 'Initial dashboard
 assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup data was not fetched');
 
 const pages = [
-  ['dashboard', 'Xin chào'], ['wallets', 'Ví &amp; tài khoản'],
+  ['dashboard', 'Xin chào'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
   ['transactions', 'Quản lý giao dịch'], ['budgets', 'Ngân sách chi tiêu'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
@@ -102,3 +103,14 @@ for (const [page, expected] of pages) {
 assert.equal(visited.filter(x => x === 'categories').length, pages.length + 1);
 assert.equal(visited.filter(x => x === 'wallets').length >= pages.length + 1, true);
 console.log(`Frontend smoke PASS: bootstrap + ${pages.length} pages (mocked API, no database).`);
+// Recurring form and reminder badge are essential new surfaces in v1.0.14.
+await runInContext('navigate("recurring")', context);
+assert.match(element('#page-content').innerHTML, /Tạo lịch định kỳ/);
+assert.ok(element('#reminder-count').hidden, 'Empty reminders should not display a badge');
+runInContext('recurringModal()', context);
+const recurringForm = element('#modal-root').innerHTML;
+assert.match(recurringForm, /name="frequency"/);
+assert.match(recurringForm, /name="mode"/);
+assert.match(recurringForm, /name="wallet_id"/);
+assert.match(recurringForm, /name="remind_days"/);
+console.log('Recurring modal smoke PASS: frequency, mode, wallet, reminder settings.');

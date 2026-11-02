@@ -454,3 +454,97 @@ def test_advanced_receivables_installments_interest_and_wallet_cashflow(client):
     assert auth_post(client,f'/api/transactions/{used.json()["id"]}',csrf=csrf,method='delete').status_code==200
     assert auth_post(client,f'/api/debt-payments/{payment["id"]}',csrf=csrf,method='delete').status_code==200
     assert client.get('/api/dashboard?month=2026-11').json()['balance']==975000
+
+
+def test_recurring_schedule_reminders_and_balances(client):
+    """Daily/monthly dates, confirmation, idempotence, cash and debt integrity."""
+    from datetime import date, timedelta
+    from types import SimpleNamespace
+    from backend.app import process_auto_recurring, scheduled_date
+
+    login = auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert login.status_code==200,login.text
+    owner_token=login.json()['csrf_token']
+    username='schedule'+uuid4().hex[:8]
+    created=auth_post(client,'/api/users',credentials(username),csrf=owner_token)
+    assert created.status_code==200,created.text
+    login=auth_post(client,'/api/login',{'username':username,'password':'SecurePassword@12345'})
+    assert login.status_code==200,login.text
+    csrf=login.json()['csrf_token']
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':50000},method='put',csrf=csrf).status_code==200
+    wallet=client.get('/api/wallets').json()['items'][0]
+    cats=client.get('/api/categories').json()
+    expense=next(x for x in cats if x['kind']=='expense')
+    income=next(x for x in cats if x['kind']=='income')
+    now=date.today().isoformat()
+    schedule={'title':'Tiền điện','kind':'expense','amount':20000,'category_id':expense['id'],
+              'wallet_id':wallet['id'],'start_on':now,'frequency':'monthly',
+              'remind_days':7,'mode':'manual','note':'Lặp lại tháng'}
+    bad=auth_post(client,'/api/recurring',{**schedule,'amount':0},csrf=csrf)
+    assert bad.status_code==422
+    registered=auth_post(client,'/api/recurring',schedule,csrf=csrf)
+    assert registered.status_code==200,registered.text
+    rule_id=registered.json()['id']
+    assert registered.json()['next_due']==now
+    assert client.get('/api/reminders').json()['items'][0]['ref_id']==rule_id
+    result=auth_post(client,f'/api/recurring/{rule_id}/confirm',csrf=csrf)
+    assert result.status_code==200,result.text
+    entry_id=result.json()['entry_id']
+    assert client.get('/api/dashboard?month='+now[:7]).json()['balance']==30000
+    assert auth_post(client,f'/api/recurring/{rule_id}/confirm',csrf=csrf).status_code==409
+    assert auth_post(client,f'/api/recurring/{rule_id}',csrf=csrf,method='delete').status_code==409
+    runs=client.get('/api/recurring').json()['history']
+    assert len([r for r in runs if r['rule_id']==rule_id])==1
+    # Posting is recorded even if the generated entry is later deleted.
+    assert auth_post(client,f'/api/transactions/{entry_id}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/dashboard?month='+now[:7]).json()['balance']==50000
+    assert client.get('/api/recurring').json()['history'][0]['status']=='deleted'
+    # An expense cannot be posted if it overdraws the associated wallet.
+    pending={**schedule,'title':'Tiền thuê nhà','amount':90000,'frequency':'weekly'}
+    p=auth_post(client,'/api/recurring',pending,csrf=csrf)
+    assert p.status_code==200,p.text
+    rid=p.json()['id']
+    assert auth_post(client,f'/api/recurring/{rid}/confirm',csrf=csrf).status_code==409
+    assert client.get('/api/recurring').json()['items'][0]['next_due']==now
+    assert auth_post(client,f'/api/recurring/{rid}/skip',csrf=csrf).status_code==200
+    assert client.get('/api/recurring').json()['items'][0]['processed_count']==1
+    assert auth_post(client,f'/api/recurring/{rid}',csrf=csrf,method='delete').status_code==409
+    # Rule edits do not alter its schedule; pausing hides upcoming reminders.
+    changes={'title':'Điện nước','amount':19000,'category_id':expense['id'],
+             'wallet_id':wallet['id'],'note':'Test', 'mode':'manual', 'remind_days':3}
+    assert auth_post(client,f'/api/recurring/{rid}',changes,csrf=csrf,method='put').status_code==200
+    assert auth_post(client,f'/api/recurring/{rid}/toggle',csrf=csrf).status_code==200
+    # Automatic income pays down payable principal exactly once.
+    debt=auth_post(client,'/api/debts',{'name':'Nợ thẻ','lender':'Ngân hàng','principal':35000,
+         'direction':'payable','interest_rate_pct':0,'installment_count':1,'note':''},csrf=csrf)
+    assert debt.status_code==200,debt.text
+    auto={**schedule,'title':'Lương','kind':'income','amount':60000,
+          'category_id':income['id'],'mode':'auto','frequency':'monthly'}
+    response=auth_post(client,'/api/recurring',auto,csrf=csrf)
+    assert response.status_code==200,response.text
+    auto_id=response.json()['id']
+    process_auto_recurring()
+    assert client.get('/api/dashboard?month='+now[:7]).json()['balance']==75000
+    assert client.get('/api/debts').json()['total_remaining']==0
+    process_auto_recurring()
+    assert len([x for x in client.get('/api/recurring').json()['history'] if x['rule_id']==auto_id])==1
+    assert client.get('/api/dashboard?month='+now[:7]).json()['balance']==75000
+    assert auth_post(client,f'/api/recurring/{auto_id}/confirm',csrf=csrf).status_code==409
+    assert auth_post(client,'/api/recurring',{**auto,'start_on':(date.today()-timedelta(days=1)).isoformat()},csrf=csrf).status_code==422
+    # Rules with no executed occurrence can be deleted; unrelated rules remain.
+    temp=auth_post(client,'/api/recurring',{**schedule,'start_on':(date.today()+timedelta(days=10)).isoformat()},csrf=csrf)
+    assert temp.status_code==200,temp.text
+    temp_id=temp.json()['id']
+    assert auth_post(client,f'/api/recurring/{temp_id}',csrf=csrf,method='delete').status_code==200
+    assert temp_id not in [x['id'] for x in client.get('/api/recurring').json()['items']]
+    # Only the owner can modify a rule (no cross-account leakage).
+    login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert login.status_code==200
+    csrf_other=login.json()['csrf_token']
+    assert not any(x['id']==auto_id for x in client.get('/api/recurring').json()['items'])
+    assert auth_post(client,f'/api/recurring/{auto_id}/toggle',csrf=csrf_other).status_code==404
+    # Month clamping preserves the original anchor day (31st -> Feb 28 -> Mar 31).
+    obj=SimpleNamespace(start_on=date(2025,1,31),next_index=1,frequency='monthly')
+    assert scheduled_date(obj)==date(2025,2,28)
+    obj.next_index=2
+    assert scheduled_date(obj)==date(2025,3,31)
