@@ -62,3 +62,28 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "MoneyFlow Local $GITHUB_REF_NAME"
+      - name: Verify published Release files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          zip="MoneyFlow-Local-${tag}-Full-Source.zip"
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$tag" --json tagName,isDraft,publishedAt,assets,url | \
+                jq -e --arg tag "$tag" --arg zip "$zip" \
+                  '.tagName == $tag and (.isDraft | not) and (.publishedAt != null) and
+                   any(.assets[]?; .name == $zip and .size > 0) and
+                   any(.assets[]?; .name == ($zip + ".sha256") and .size > 0)' >/dev/null; then
+              url="$(gh release view "$tag" --json url --jq '.url')"
+              echo "### Release $tag successfully published" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Release URL: $url" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Verified: source ZIP and SHA-256 assets" >> "$GITHUB_STEP_SUMMARY"
+              echo "RELEASE VERIFIED: $url"
+              exit 0
+            fi
+            sleep 4
+          done
+          echo "ERROR: Release $tag not published with both expected assets" >&2
+          exit 1

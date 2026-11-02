@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.9
+# MoneyFlow Local v1.0.10
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, ngân sách, **quản lý nợ gốc** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -94,17 +94,40 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 
 ## Kiểm thử, build và GitHub Release
 
-Đã đăng nhập GitHub CLI và cấu hình `origin` trỏ tới repository chính là điều kiện trước khi phát hành. Script `publish.ps1` tự kiểm tra Docker, chạy test, build image, đóng ZIP + SHA-256, kiểm tra staging (không gửi `.env`, database hoặc bí mật), commit/push rồi push tag để GitHub Actions kiểm thử lại và tạo Release.
+Đã đăng nhập GitHub CLI và cấu hình `origin` trỏ tới repository chính là điều kiện trước khi phát hành. Script `publish.ps1` tự kiểm tra Docker, chạy test, build image, đóng ZIP + SHA-256, kiểm tra staging (không gửi `.env`, database hoặc bí mật), commit/push rồi push tag để GitHub Actions kiểm thử lại, tạo Release. **v1.0.10 chỉ thông báo thành công khi đã kiểm tra workflow `success`, Release `published` và đủ Full Source ZIP + SHA-256.**
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.9
+.\scripts\publish.ps1 -Version 1.0.10
 ```
 
-Từ lần phát hành kế tiếp, nếu phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
+Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
 
 Đối với môi trường phát triển CI trên Linux, workflow gọi trực tiếp `docker build`/`docker run`; phần tự mở Docker Desktop chỉ sử dụng trên Windows.
+
+### Xác nhận GitHub Release và thông báo tự động (v1.0.10)
+
+Sau khi push `v1.0.10`, `publish.ps1` tự đợi workflow `release.yml` **đúng tag và commit** hoàn thành, kiểm tra kết quả thành công, xác minh Release đã **xuất bản (không ở dạng draft)** và đã tải lên **hai file Full Source ZIP và SHA-256 có dung lượng khác 0**. Chỉ khi đó mới hiện thông báo màu xanh trong PowerShell kèm URL Release và **hộp thoại xác nhận trên Windows** (có thể tắt bằng `-NoReleasePopup`). Đang chạy, lỗi hoặc hết thời gian không được báo thành công.
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+.\scripts\publish.ps1 -Version 1.0.10
+```
+
+Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
+
+```powershell
+.\scripts\verify-release.ps1 -Version 1.0.10
+```
+
+Tùy chọn thời gian chờ (mặc định 1200 giây = 20 phút):
+
+```powershell
+.\scripts\publish.ps1 -ReleaseTimeoutSeconds 1800 -NoReleasePopup
+```
+
+Nếu lần phát hành đã push tag nhưng GitHub Actions bị lỗi, **không chạy lại `publish.ps1` với cùng tag**; xem kết quả tại `https://github.com/TamNhien/moneyflow/actions/workflows/release.yml`, sửa lỗi và chạy lại workflow phù hợp, sau đó dùng `verify-release.ps1` để xác nhận. Khi GitHub Actions chưa thể xác nhận (ví dụ mất Internet, thiếu quyền GitHub hoặc bị timeout), cần kiểm tra thủ công chứ không coi là đã thành công.
 
 ## Bảo mật và giới hạn
 
@@ -127,6 +150,7 @@ Từ lần phát hành kế tiếp, nếu phiên bản trước đã được ph
 | v1.0.6 | Sửa khả năng bắt tay TLS khi truy cập HTTPS bằng IP, cấu hình SNI Caddy. |
 | v1.0.7 | Quản lý nợ gốc, tự phân bổ tiền thu để trả nợ, lịch sử thanh toán. |
 | v1.0.8 | Tự mở Docker Desktop khi test/build/chạy/phát hành; đợi Engine và thêm lệnh `run.ps1`. |
-| **v1.0.9** | **Nút Đăng xuất cạnh tài khoản trên thanh trên cùng; hiển thị và chuẩn hóa số điện thoại Việt Nam về đầu số 0, không thay đổi dữ liệu tài chính.** |
+| v1.0.9 | Nút Đăng xuất cạnh tài khoản; chuẩn hóa số điện thoại Việt Nam về đầu số 0. |
+| **v1.0.10** | **Theo dõi GitHub Actions đến khi hoàn thành, xác minh Release published + ZIP/SHA-256, hiển thị thông báo PowerShell và popup Windows khi thành công; lỗi hoặc timeout sẽ báo chính xác.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

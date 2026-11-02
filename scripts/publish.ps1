@@ -1,8 +1,10 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 [CmdletBinding()]
 param(
     [string] $Version = '',
-    [ValidateSet('patch', 'minor', 'major')][string] $Bump = 'patch'
+    [ValidateSet('patch', 'minor', 'major')][string] $Bump = 'patch',
+    [ValidateRange(30, 7200)][int] $ReleaseTimeoutSeconds = 1200,
+    [switch] $NoReleasePopup
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -58,20 +60,20 @@ $legacyDocs = @('CHANGELOG.md', 'UPGRADE-TO-v1.0.1.md',
 Write-Host 'Docker preflight (auto-start when needed)...' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'ensure-docker.ps1')
 if (-not $?) { throw 'Docker Engine chua san sang; publishing stopped.' }
-Write-Host '[1/6] Isolated API tests and frontend syntax...' -ForegroundColor Cyan
+Write-Host '[1/7] Isolated API tests and frontend syntax...' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'test.ps1')
 if (-not $?) { throw 'Tests failed; nothing pushed.' }
-Write-Host '[2/6] Build application image...' -ForegroundColor Cyan
+Write-Host '[2/7] Build application image...' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'build.ps1') -Version $Version
 if (-not $?) { throw 'Application build failed; nothing pushed.' }
-Write-Host '[3/6] Generate source ZIP and SHA-256...' -ForegroundColor Cyan
+Write-Host '[3/7] Generate source ZIP and SHA-256...' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'cleanup-docs.ps1')
 if (-not $?) { throw 'Documentation cleanup failed.' }
 # New releases append a concise entry in the single README; edit details before publishing when needed.
 if ($Version -ne $current) {
     $readmePath = Join-Path $root 'README.md'
     $readmeBody = Get-Content -LiteralPath $readmePath -Raw
-    if ($readmeBody -notmatch ('(?m)^### v' + [regex]::Escape($Version) + '($|:)')) {
+    if ($readmeBody -notmatch ('(?m)(^###\s+|^\|\s*\*{0,2})v' + [regex]::Escape($Version) + '(\b|\*|\s|:)')) {
         $entry = "`n### v$Version : Release $(Get-Date -Format 'yyyy-MM-dd')`n`n- Source code, tests and build published automatically using the GitHub workflow.`n"
         [IO.File]::AppendAllText($readmePath, $entry, (New-Object Text.UTF8Encoding($false)))
     }
@@ -79,7 +81,7 @@ if ($Version -ne $current) {
 [IO.File]::WriteAllText($versionFile, ($Version + "`n"), (New-Object Text.UTF8Encoding($false)))
 & (Join-Path $PSScriptRoot 'package.ps1') -Version $Version
 if (-not $?) { throw 'Packaging failed; nothing pushed.' }
-Write-Host '[4/6] Verify Git staged files (secrets excluded)...' -ForegroundColor Cyan
+Write-Host '[4/7] Verify Git staged files (secrets excluded)...' -ForegroundColor Cyan
 # Git fails when ANY pathspec does not exist in a new repository. Stage real paths only.
 $presentPaths = @($allowed | Where-Object { Test-Path -LiteralPath (Join-Path $root $_) })
 if ($presentPaths.Count -eq 0) { throw 'No source files found for Git staging.' }
@@ -114,11 +116,15 @@ foreach ($entry in $staged) {
 if ($staged.Count -eq 0) { throw 'No project changes staged. Make a source or README change before publishing.' }
 & git diff --cached --stat
 if ($LASTEXITCODE -ne 0) { throw 'Git diff failed.' }
-Write-Host '[5/6] Commit and push to GitHub...' -ForegroundColor Cyan
+Write-Host '[5/7] Commit and push to GitHub...' -ForegroundColor Cyan
 Invoke-Checked 'git' @('commit', '-m', ('release: ' + $tag))
 Invoke-Checked 'git' @('push', '-u', 'origin', 'HEAD:main')
-Write-Host '[6/6] Create and push annotated version tag...' -ForegroundColor Cyan
+Write-Host '[6/7] Create and push annotated version tag...' -ForegroundColor Cyan
 Invoke-Checked 'git' @('tag', '-a', $tag, '-m', ('MoneyFlow Local ' + $tag))
 Invoke-Checked 'git' @('push', 'origin', $tag)
-Write-Host ('Source pushed. GitHub Actions will verify ' + $tag + ' then create a GitHub Release.') -ForegroundColor Green
-Write-Host 'Repository > Actions: CI / Release; Repository > Releases: assets.' -ForegroundColor Cyan
+Write-Host ('Tag ' + $tag + ' pushed; waiting for GitHub Actions and published Release...') -ForegroundColor Cyan
+Write-Host '[7/7] Verify the GitHub Release is published with both ZIP and SHA-256 assets...' -ForegroundColor Cyan
+# This verification must succeed before declaring the release successful.
+& (Join-Path $PSScriptRoot 'verify-release.ps1') -Version $Version -TimeoutSeconds $ReleaseTimeoutSeconds -NoPopup:$NoReleasePopup
+if (-not $?) { throw ('Release ' + $tag + ' was not verified. Run scripts/verify-release.ps1 to retry verification (do not push an existing tag again).') }
+
