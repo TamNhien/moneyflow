@@ -548,3 +548,70 @@ def test_recurring_schedule_reminders_and_balances(client):
     assert scheduled_date(obj)==date(2025,2,28)
     obj.next_index=2
     assert scheduled_date(obj)==date(2025,3,31)
+
+
+def test_reports_cashflow_excel_pdf_and_isolation(client):
+    """Report transfers are internal; debt cashflow is counted exactly once."""
+    from io import BytesIO
+    from openpyxl import load_workbook
+    owner=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert owner.status_code==200,owner.text
+    t=owner.json()['csrf_token']
+    user=credentials('reporter')
+    created=auth_post(client,'/api/users',user,csrf=t)
+    assert created.status_code==200,created.text
+    login=auth_post(client,'/api/login',{'username':'reporter','password':user['password']})
+    assert login.status_code==200,login.text
+    token=login.json()['csrf_token']
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':1_000_000},method='put',csrf=token).status_code==200
+    cats=client.get('/api/categories').json();expense=next(c for c in cats if c['kind']=='expense');income=next(c for c in cats if c['kind']=='income')
+    default=client.get('/api/wallets').json()['items'][0]['id']
+    created_wallet=auth_post(client,'/api/wallets',{'name':'Tài khoản ngân hàng','kind':'bank','opening_balance':500000},csrf=token)
+    assert created_wallet.status_code==200,created_wallet.text
+    bank=created_wallet.json()['id']
+    assert auth_post(client,'/api/wallet-transfers',{'from_wallet_id':default,'to_wallet_id':bank,'amount':25000,'occurred_on':'2026-11-01'},csrf=token).status_code==200
+    payable=auth_post(client,'/api/debts',{'name':'Khoản vay A','direction':'payable','principal':80000},csrf=token).json()['id']
+    receivable=auth_post(client,'/api/debts',{'name':'Tiền cho bạn mượn','direction':'receivable','principal':50000},csrf=token).json()['id']
+    i=auth_post(client,'/api/transactions',{'kind':'income','title':'Lương', 'amount':60000,
+                  'category_id':income['id'],'wallet_id':default,'occurred_on':'2026-11-02'},csrf=token)
+    assert i.status_code==200,i.text
+    assert i.json()['debt_paid']==60000
+    assert auth_post(client,f'/api/debts/{payable}/payments',{'amount':20000,'interest_amount':0,'wallet_id':default,'paid_on':'2026-11-02'},csrf=token).status_code==200
+    assert auth_post(client,f'/api/debts/{receivable}/payments',{'amount':10000,'interest_amount':1000,'wallet_id':bank,'paid_on':'2026-11-02'},csrf=token).status_code==200
+    bad_title='=HYPERLINK("http://evil.test","bad")'
+    assert auth_post(client,'/api/transactions',{'kind':'expense','title':bad_title,
+           'amount':40000,'category_id':expense['id'],'wallet_id':default,'occurred_on':'2026-11-02'},csrf=token).status_code==200
+    res=client.get('/api/reports?end=2026-11&months=3')
+    assert res.status_code==200,res.text
+    data=res.json()
+    assert len(data['monthly'])==3
+    assert data['totals']['income']==60000 and data['totals']['expense']==40000
+    assert data['totals']['debt_paid']==80000
+    assert data['totals']['debt_collected']==11000
+    assert data['totals']['net_cash']==-49000
+    assert data['snapshot']['cash_balance']==1451000
+    assert data['snapshot']['receivable']==40000
+    assert data['snapshot']['payable']==0
+    assert data['snapshot']['net_worth']==1491000
+    assert data['transfer_count']==1 and data['transfer_amount']==25000
+    assert data['comparison']['income']['percentage'] is None
+    assert data['categories'][0]['amount']==40000
+    assert 'transactions' not in data and 'payments' not in data
+    assert client.get('/api/reports?end=bad').status_code==422
+    assert client.get('/api/reports?end=2026-11&months=500').status_code==422
+    excel=client.get('/api/reports.xlsx?end=2026-11&months=3')
+    assert excel.status_code==200 and excel.content[:2]==b'PK'
+    assert 'no-store' in excel.headers.get('cache-control','')
+    wb=load_workbook(BytesIO(excel.content),data_only=False)
+    assert wb.sheetnames==['Tổng quan','Theo tháng','Danh mục chi','Các ví','Giao dịch','Thanh toán nợ']
+    ws=wb['Giao dịch'];danger=next(row[2] for row in ws.iter_rows(min_row=2,values_only=True) if 'HYPERLINK' in row[2])
+    assert danger.startswith("'=HYPERLINK")
+    assert all(cell.data_type!='f' for row in ws for cell in row)
+    pdf=client.get('/api/reports.pdf?end=2026-11&months=3')
+    assert pdf.status_code==200,pdf.text[:200] if pdf.status_code!=200 else ''
+    assert pdf.content.startswith(b'%PDF-') and len(pdf.content)>12000
+    # Account isolation: original admin account cannot read 'reporter' finances.
+    assert auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'}).status_code==200
+    other=client.get('/api/reports?end=2026-11&months=3').json()
+    assert other['totals']['income']!=60000
+    assert all(c['amount']!=40000 for c in other['categories'])

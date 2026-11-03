@@ -1522,6 +1522,32 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
             'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance-debt_remaining+receivable_remaining}
 
 
+@app.get('/api/reports')
+def reports(end: str, response: Response, months: int = 12, u: User = Depends(current), db: Session = Depends(get_db)):
+    from backend.reporting import build_report, as_public_report
+    response.headers['Cache-Control'] = 'no-store'
+    return as_public_report(build_report(db, u.id, end, months))
+
+
+@app.get('/api/reports.xlsx')
+def reports_excel(end: str, months: int = 12, u: User = Depends(current), db: Session = Depends(get_db)):
+    from backend.reporting import build_report, excel_bytes
+    content = excel_bytes(build_report(db, u.id, end, months))
+    return Response(content=content,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="moneyflow-report-{end}.xlsx"',
+                 'Cache-Control': 'no-store'})
+
+
+@app.get('/api/reports.pdf')
+def reports_pdf(end: str, months: int = 12, u: User = Depends(current), db: Session = Depends(get_db)):
+    from backend.reporting import build_report, pdf_bytes
+    content = pdf_bytes(build_report(db, u.id, end, months))
+    return Response(content=content, media_type='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename="moneyflow-report-{end}.pdf"',
+                 'Cache-Control': 'no-store'})
+
+
 @app.get('/api/export.csv')
 def export_csv(month:str|None=None,u:User=Depends(current),db:Session=Depends(get_db)):
     stmt=select(Entry).where(Entry.user_id==u.id)

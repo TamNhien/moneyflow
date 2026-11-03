@@ -58,6 +58,7 @@ const responses = {
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
   'budgets': [], 'debts': debtData, 'users': [fakeUser],
   'recurring': {items:[],history:[]}, 'reminders': {items:[],overdue_count:0,upcoming_count:0},
+  'reports': {end_month:'2026-11',from_month:'2025-12',to_month:'2026-11',months_count:12,totals:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},snapshot:{cash_balance:100000,payable:0,receivable:0,net_worth:100000},selected_month:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},comparison:{income:{current:100,previous:0,difference:100,percentage:null},expense:{current:40,previous:0,difference:40,percentage:null},net_cash:{current:60,previous:0,difference:60,percentage:null}},monthly:Array.from({length:12},(_,i)=>({month:`2026-${String(i+1).padStart(2,'0')}`,income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60})),categories:[{name:'Ăn uống',color:'#6475ff',amount:40}],transfer_count:0},
   'audit': [{ id: 1, at: '2026-11-02T10:00:00Z', actor: 'owner', action: 'login', detail: 'OK' }],
 };
 async function fetchMock(path) {
@@ -85,7 +86,7 @@ assert.match(element('#page-content').innerHTML, /Xin chào/, 'Initial dashboard
 assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup data was not fetched');
 
 const pages = [
-  ['dashboard', 'Xin chào'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
+  ['dashboard', 'Xin chào'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
   ['transactions', 'Quản lý giao dịch'], ['budgets', 'Ngân sách chi tiêu'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
@@ -114,3 +115,9 @@ assert.match(recurringForm, /name="mode"/);
 assert.match(recurringForm, /name="wallet_id"/);
 assert.match(recurringForm, /name="remind_days"/);
 console.log('Recurring modal smoke PASS: frequency, mode, wallet, reminder settings.');
+
+await runInContext('navigate("reports")', context);
+assert.match(element('#page-content').innerHTML,/Xuất Excel/);
+assert.match(element('#page-content').innerHTML,/Xuất PDF/);
+assert.match(element('#page-content').innerHTML,/Tài sản ròng/);
+console.log('Financial reports smoke PASS: chart, filters, export controls, net worth.');

@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.14
+# MoneyFlow Local v1.0.15
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -113,6 +113,12 @@ Giữ các volume Docker để không mất database và CA cũ. Không dùng `d
 
 ## Chức năng
 
+- Quản lý nhiều người dùng, phân quyền Admin/Member, phiên đăng nhập và khôi phục mật khẩu qua SMTP.
+- Ví tiền mặt/ngân hàng/ví điện tử, chuyển ví nội bộ, danh mục, thu/chi, ngân sách và lịch sử.
+- Nợ phải thu/phải trả, gốc/lãi, thanh toán từ ví, lịch trả góp và tự phân bổ khoản thu cho nợ phải trả.
+- Giao dịch định kỳ, nhắc hạn trong ứng dụng, dashboard và báo cáo tài chính có xuất Excel/PDF.
+- GitHub Actions tự test/build/phát hành và xác minh Release có đủ ZIP + SHA-256.
+
 - **Tiền ban đầu và số dư:** số dư = tiền gốc + thu nhập − chi tiêu − trả nợ gốc/lãi + tiền thu hồi nợ gốc/lãi. Các lần chuyển ví không làm thay đổi tổng số dư. Chặn thao tác khiến từng ví âm.
 - **Giao dịch thu/chi:** thêm, sửa, xóa, lọc theo tháng, danh mục; xuất CSV UTF-8 BOM.
 - **Quản lý nợ:** nợ phải trả/phải thu, người vay/cho vay, lịch trả góp, lãi suất ước tính, lịch sử gốc và lãi thực tế; có thu hồi/trả thủ công và hoàn tác khi hợp lệ.
@@ -145,7 +151,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.14
+.\scripts\publish.ps1 -Version 1.0.15
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -158,13 +164,13 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.14
+.\scripts\publish.ps1 -Version 1.0.15
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
 
 ```powershell
-.\scripts\verify-release.ps1 -Version 1.0.14
+.\scripts\verify-release.ps1 -Version 1.0.15
 ```
 
 Tùy chọn thời gian chờ (mặc định 1200 giây = 20 phút):
@@ -182,6 +188,17 @@ Nếu lần phát hành đã push tag nhưng GitHub Actions bị lỗi, **không
 - PostgreSQL chỉ ánh xạ `127.0.0.1:5435` cho máy Windows. Tài khoản DB mật khẩu `moneyflow` là cấu hình local theo yêu cầu và không phù hợp cho triển khai qua Internet.
 - Bài kiểm thử API hiện dùng SQLite tạm để kiểm tra nghiệp vụ, không thay thế kiểm thử tích hợp đầy đủ trên PostgreSQL hoặc Windows/Docker.
 - Tự mở Docker Desktop không thể chữa các lỗi WSL2/HCS hoặc ổ VHDX bị khóa; script sẽ thông báo rõ thay vì giả định Docker đã chạy.
+
+
+## Báo cáo tài chính nâng cao (v1.0.15)
+
+Menu **Báo cáo tài chính** cho phép chọn 3, 6, 12 hoặc 24 tháng tính đến tháng đang chọn ở góc phải. Các chỉ tiêu bao gồm tổng thu/chi, dòng tiền thuần (thu − chi − các khoản trả nợ + thu hồi nợ), so sánh với tháng liền trước, chi theo danh mục, số dư ví, nợ phải thu/phải trả và tài sản ròng hiện tại.
+
+- **Excel** (`/api/reports.xlsx`): 6 sheet Tổng quan, Theo tháng, Danh mục chi, Các ví, Giao dịch, Thanh toán nợ; số tiền dạng số nguyên VNĐ; nội dung do người dùng nhập được xử lý chống công thức độc hại.
+- **PDF** (`/api/reports.pdf`): báo cáo A4 Unicode tiếng Việt, tóm tắt, biểu đồ và bảng từng tháng.
+- Các API chỉ xuất dữ liệu của **tài khoản đang đăng nhập**; không thay đổi số dư hay database; tải về có header `Cache-Control: no-store`.
+- Chuyển tiền qua lại giữa các ví **không tính là thu/chi**, tiền trả nợ gốc/lãi không cộng hai lần vào chi phí. Số dư ví/nợ/tài sản ròng là **số liệu tại thời điểm xuất**; không suy luận thành số dư chốt cuối các tháng trong quá khứ.
+- Docker cài gói font DejaVu trong image để PDF hiển thị dấu tiếng Việt, không cần tải font thủ công trên Windows.
 
 ## Lịch sử phát triển (một README.md)
 
@@ -201,6 +218,7 @@ Nếu lần phát hành đã push tag nhưng GitHub Actions bị lỗi, **không
 | v1.0.11 | Quản lý nhiều ví tiền mặt/ngân hàng/ví điện tử, chuyển ví nội bộ không tính thu/chi, gắn thu chi và trả nợ vào từng ví, migration an toàn từ sổ cũ. |
 | **v1.0.12** | **Phân loại nợ phải trả/phải thu; thu hồi theo ví; nhập lãi thực tế; lịch trả góp và lãi ước tính; bảo vệ tính toàn vẹn dòng tiền và migration dữ liệu nợ cũ.** |
 | **v1.0.13** | **Sửa các hàm frontend bị thiếu khiến trang Tổng quan trống; khôi phục toàn bộ màn hình Ví, Người dùng và Nhật ký; bổ sung kiểm thử tự động 9 màn hình trong PowerShell và GitHub Actions.** |
-| **v1.0.14** | **Thu/chi định kỳ theo ví, chế độ xác nhận hoặc tự ghi, lịch sử chống trùng, nhắc trước hạn cho lịch và nợ, dashboard nhận thông báo, 10 màn hình frontend và 12 kiểm thử API/migration.** |
+| v1.0.14 | **Thu/chi định kỳ theo ví, chế độ xác nhận hoặc tự ghi, lịch sử chống trùng, nhắc trước hạn cho lịch và nợ, dashboard nhận thông báo, 10 màn hình frontend và 12 kiểm thử API/migration.** |
+| **v1.0.15** | **Báo cáo theo 3/6/12/24 tháng, so sánh thu chi, tính dòng tiền có xét trả/thu hồi nợ và loại trừ chuyển ví nội bộ; tổng tài sản ròng hiện tại; xuất Excel 6 sheet và PDF tiếng Việt; kiểm thử API và frontend cho báo cáo.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.
