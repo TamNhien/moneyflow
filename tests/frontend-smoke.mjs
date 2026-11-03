@@ -39,7 +39,7 @@ const entry = { id: 7, title: 'Ăn trưa', kind: 'expense', amount: 25000,
   occurred_on: '2026-11-02', category: 'Ăn uống', color: '#6475ff',
   category_id: 1, wallet_id: 1, note: 'Đã thanh toán', debt_paid: 0 };
 const dashboard = {
-  balance: 100000, opening_balance: 100000, total_opening_balance: 100000,
+  balance: 100000, savings_reserved: 0, total_assets: 100000, opening_balance: 100000, total_opening_balance: 100000,
   total_income: 0, total_expense: 0, month_income: 0, month_expense: 0,
   month_count: 0, wallets: [wallet], debt_remaining: 0, receivable_remaining: 0,
   debt_paid: 0, net_worth: 100000, trend: [], categories: [], recent: [entry], budgets: [],
@@ -54,6 +54,7 @@ const responses = {
   'me': { user: fakeUser, csrf_token: 'csrf-for-test' },
   'categories': categories,
   'wallets': { items: [wallet], transfers: [], total_balance: wallet.balance },
+  'savings': {items: [{id:1,name:'Quỹ dự phòng',target_amount:200000,saved_amount:25000,remaining_amount:175000,progress_pct:12.5,complete:false,due_date:null,note:'Tích lũy',created_at:'2026-11-01'}],total_saved:25000,total_targets:200000,history:[]},
   'dashboard': dashboard,
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
   'budgets': [], 'debts': debtData, 'users': [fakeUser],
@@ -86,7 +87,7 @@ assert.match(element('#page-content').innerHTML, /Xin chào/, 'Initial dashboard
 assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup data was not fetched');
 
 const pages = [
-  ['dashboard', 'Xin chào'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
+  ['dashboard', 'Xin chào'], ['savings', 'Mục tiêu tiết kiệm'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
   ['transactions', 'Quản lý giao dịch'], ['budgets', 'Ngân sách chi tiêu'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
@@ -130,3 +131,15 @@ await runInContext('navigate("settings")',context);
 assert.match(element('#page-content').innerHTML,/Bật xác thực 2 bước/);
 assert.match(element('#page-content').innerHTML,/Phiên đăng nhập/);
 console.log('Security & export smoke PASS: TOTP setup, sessions and distinct Excel/PDF buttons.');
+
+assert.ok(visited.includes('savings'), 'Savings goals screen not fetched');
+await runInContext('navigate("savings")', context);
+assert.match(element('#page-content').innerHTML, /Quỹ dự phòng/);
+
+await runInContext('savingsModal(state.savingsData.items[0])', context);
+assert.match(element('#modal-root').innerHTML, /Sửa mục tiêu tiết kiệm/);
+await runInContext('savingsMoveModal(state.savingsData.items[0], "deposit")', context);
+assert.match(element('#modal-root').innerHTML, /Góp tiền vào mục tiêu/);
+await runInContext('savingsMoveModal(state.savingsData.items[0], "withdraw")', context);
+assert.match(element('#modal-root').innerHTML, /Rút tiền về ví/);
+console.log('Savings goals modal smoke PASS: create/edit, deposit and withdraw.');

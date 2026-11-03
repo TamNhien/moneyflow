@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.16
+# MoneyFlow Local v1.0.17
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -151,7 +151,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.16
+.\scripts\publish.ps1 -Version 1.0.17
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -164,7 +164,7 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.16
+.\scripts\publish.ps1 -Version 1.0.17
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
@@ -199,6 +199,19 @@ Menu **Báo cáo tài chính** cho phép chọn 3, 6, 12 hoặc 24 tháng tính 
 - Các API chỉ xuất dữ liệu của **tài khoản đang đăng nhập**; không thay đổi số dư hay database; tải về có header `Cache-Control: no-store`.
 - Chuyển tiền qua lại giữa các ví **không tính là thu/chi**, tiền trả nợ gốc/lãi không cộng hai lần vào chi phí. Số dư ví/nợ/tài sản ròng là **số liệu tại thời điểm xuất**; không suy luận thành số dư chốt cuối các tháng trong quá khứ.
 - Docker cài gói font DejaVu trong image để PDF hiển thị dấu tiếng Việt, không cần tải font thủ công trên Windows.
+
+## Mục tiêu tiết kiệm (v1.0.17)
+
+Trang **Mục tiêu tiết kiệm** cho phép tạo tối đa 50 kế hoạch (quỹ dự phòng, mua xe, du lịch...), đặt số tiền cần đạt, ngày dự kiến và ghi chú. Mỗi tài khoản có danh sách và lịch sử riêng, hiển thị số tiền dành riêng và thanh tiến độ.
+
+- **Góp tiền:** chọn ví đang hoạt động và số tiền. Hệ thống ghi vào `savings_movements` và **giảm số dư khả dụng của ví**, đồng thời tăng số tiền dành riêng. Chặn góp vượt mục tiêu hoặc vượt số dư ví. Không ghi thêm thu nhập hoặc chi tiêu.
+- **Rút về ví:** cho phép chuyển tiền đã dành riêng về một ví đang hoạt động; kiểm tra không rút quá quỹ. Giảm quỹ và tăng tiền khả dụng tương ứng. Không phải giao dịch thu nhập mới, không kích hoạt tự động trả nợ.
+- **Không có chuyển khoản ngân hàng thật:** đây là phân bổ logic giữa phần có thể chi và phần dành riêng cho mục tiêu; nếu bạn cần chuyển tiền thật tại ngân hàng, hãy thực hiện tại ngân hàng. Mục tiêu và giao dịch ghi sổ không tự sinh lãi.
+- **Tổng tài sản tiền = số dư khả dụng + tiền dành riêng**. Tài sản ròng cộng thêm nợ phải thu và trừ nợ phải trả. Chuyển tiền vào/ra mục tiêu không đổi tổng tài sản và không làm thay đổi dòng tiền thuần trên báo cáo tháng.
+- Chỉ xóa mục tiêu khi tiền dành riêng đã về **0đ**; sửa hạn mức không được nhỏ hơn tiền đã góp. Các khoản góp/rút đã ghi giữ dạng lịch sử bất biến (không sửa/xóa từng chuyển động). Khi mục tiêu bị xóa ở trạng thái 0đ, lịch sử liên quan bị xóa theo.
+- Database có hai bảng `savings_goals` và `savings_movements` tự tạo khi FastAPI khởi động. Bảng cũ, tiền đang có trong ví, khoản nợ và giao dịch trước đó **không bị sửa**. Không tự động trích tiền khỏi ví khi tạo mục tiêu.
+- Dashboard và báo cáo Excel/PDF bổ sung chỉ tiêu dành riêng và tính lại tài sản ròng. **Dòng tiền thuần** tiếp tục chỉ dùng thu, chi, trả nợ, thu hồi nợ; không cộng trùng chuyển ví/mục tiêu.
+- Tích hợp kiểm tra bất thường trong **Cài đặt → Bảo mật nâng cao → Kiểm tra số dư**, phát hiện quỹ âm, vượt mục tiêu hoặc liên kết sai chủ tài khoản. Chỉ phát hiện, không tự sửa.
 
 ## Bảo mật nâng cao (v1.0.16)
 
@@ -235,5 +248,6 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | v1.0.14 | **Thu/chi định kỳ theo ví, chế độ xác nhận hoặc tự ghi, lịch sử chống trùng, nhắc trước hạn cho lịch và nợ, dashboard nhận thông báo, 10 màn hình frontend và 12 kiểm thử API/migration.** |
 | **v1.0.15** | **Báo cáo theo 3/6/12/24 tháng, so sánh thu chi, tính dòng tiền có xét trả/thu hồi nợ và loại trừ chuyển ví nội bộ; tổng tài sản ròng hiện tại; xuất Excel 6 sheet và PDF tiếng Việt; kiểm thử API và frontend cho báo cáo.** |
 | **v1.0.16** | **Phân biệt trực quan nút Excel/PDF, xác nhận MIME/chữ ký tệp; TOTP Authenticator có QR, mã dự phòng một lần, mã hóa bí mật trong DB, khóa sau nhiều lần nhập sai, quản lý phiên, kiểm tra nhất quán dữ liệu và migration không mất tài khoản cũ.** |
+| **v1.0.17** | **Mục tiêu tiết kiệm: góp/rút từ các ví, quỹ dành riêng không tính thu chi, tiến độ và hạn dự kiến, quản lý nhiều mục tiêu, phân quyền, kiểm tra sổ tiền, báo cáo tài sản ròng tính cả tiền tiết kiệm.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

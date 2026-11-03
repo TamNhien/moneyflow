@@ -113,6 +113,35 @@ class WalletTransfer(Base):
                       CheckConstraint('from_wallet_id <> to_wallet_id', name='ck_transfer_distinct'))
 
 
+class SavingsGoal(Base):
+    """Reserved money is still an asset; it is excluded from spendable wallet funds."""
+    __tablename__ = 'savings_goals'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    target_amount: Mapped[int] = mapped_column(BigInteger)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    note: Mapped[str] = mapped_column(String(300), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('target_amount > 0', name='ck_savings_target_positive'),)
+
+
+class SavingsMovement(Base):
+    """Immutable deposit/withdrawal ledger; allocation is not an income/expense."""
+    __tablename__ = 'savings_movements'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    goal_id: Mapped[int] = mapped_column(ForeignKey('savings_goals.id'), index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(10))
+    amount: Mapped[int] = mapped_column(BigInteger)
+    occurred_on: Mapped[date] = mapped_column(Date, index=True)
+    note: Mapped[str] = mapped_column(String(300), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('amount > 0', name='ck_savings_move_positive'),
+                      CheckConstraint("kind IN ('deposit', 'withdraw')", name='ck_savings_move_kind'))
+
+
 class Category(Base):
     __tablename__ = 'categories'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -523,7 +552,27 @@ def wallet_balance(db: Session, wallet: Wallet) -> int:
         WalletTransfer.user_id == user_id, WalletTransfer.to_wallet_id == wallet_id)) or 0
     outgoing = db.scalar(select(func.coalesce(func.sum(WalletTransfer.amount),0)).where(
         WalletTransfer.user_id == user_id, WalletTransfer.from_wallet_id == wallet_id)) or 0
-    return int(wallet.opening_balance) + int(income) - int(expense) + int(debt_delta) + int(incoming) - int(outgoing)
+    savings_delta = db.scalar(select(func.coalesce(func.sum(SavingsMovement.amount), 0)).where(
+        SavingsMovement.user_id == user_id, SavingsMovement.wallet_id == wallet_id,
+        SavingsMovement.kind == 'withdraw')) or 0
+    savings_allocated = db.scalar(select(func.coalesce(func.sum(SavingsMovement.amount), 0)).where(
+        SavingsMovement.user_id == user_id, SavingsMovement.wallet_id == wallet_id,
+        SavingsMovement.kind == 'deposit')) or 0
+    return int(wallet.opening_balance) + int(income) - int(expense) + int(debt_delta) + int(incoming) - int(outgoing) + int(savings_delta) - int(savings_allocated)
+
+
+def total_reserved_savings(db: Session, user_id: int) -> int:
+    deposits = db.scalar(select(func.coalesce(func.sum(SavingsMovement.amount), 0)).where(
+        SavingsMovement.user_id == user_id, SavingsMovement.kind == 'deposit')) or 0
+    withdrawals = db.scalar(select(func.coalesce(func.sum(SavingsMovement.amount), 0)).where(
+        SavingsMovement.user_id == user_id, SavingsMovement.kind == 'withdraw')) or 0
+    return int(deposits) - int(withdrawals)
+
+
+def savings_goal_balance(db: Session, goal_id: int, user_id: int) -> int:
+    rows = db.execute(select(SavingsMovement.kind, SavingsMovement.amount).where(
+        SavingsMovement.user_id == user_id, SavingsMovement.goal_id == goal_id))
+    return sum(int(amount) * (1 if kind == 'deposit' else -1) for kind, amount in rows)
 
 
 def current_balance(db, user_id, opening=None):
@@ -533,7 +582,8 @@ def current_balance(db, user_id, opening=None):
     opening_sum = sum(w.opening_balance for w in wallets)
     if opening is not None:
         opening_sum += int(opening) - default_wallet(db, user_id).opening_balance
-    return int(opening_sum)+int(inc)-int(exp)+debt_cash_delta(db,user_id),int(inc),int(exp)
+    available = int(opening_sum) + int(inc) - int(exp) + debt_cash_delta(db, user_id)
+    return available - total_reserved_savings(db, user_id), int(inc), int(exp)
 
 
 def ensure_nonnegative(db, user_id):
@@ -698,6 +748,21 @@ class EditWallet(BaseModel):
 class TransferWallet(BaseModel):
     from_wallet_id: int
     to_wallet_id: int
+    amount: int
+    occurred_on: date = Field(default_factory=date.today)
+    note: str = Field(default='', max_length=300)
+
+
+class NewSavingsGoal(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    target_amount: int
+    due_date: date | None = None
+    note: str = Field(default='', max_length=300)
+
+
+class NewSavingsMovement(BaseModel):
+    kind: Literal['deposit', 'withdraw']
+    wallet_id: int
     amount: int
     occurred_on: date = Field(default_factory=date.today)
     note: str = Field(default='', max_length=300)
@@ -1042,6 +1107,21 @@ def security_integrity(request:Request,db:Session=Depends(get_db)):
         paid=db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(DebtPayment.debt_id==d.id,DebtPayment.user_id==u.id)) or 0
         if d.remaining<0 or d.remaining>d.principal or d.principal-int(paid)!=d.remaining:
             checks.append({'kind':'invalid_debt','detail':f'Khoản nợ #{d.id} có số gốc hoặc lịch sử thanh toán không khớp.'})
+    # Validate saved reserves without mutating financial records.
+    total_checked_savings = 0
+    for goal in db.scalars(select(SavingsGoal).where(SavingsGoal.user_id==u.id)):
+        saved=savings_goal_balance(db,goal.id,u.id)
+        total_checked_savings+=saved
+        if saved<0 or saved>goal.target_amount:
+            checks.append({'kind':'invalid_savings_goal','detail':f'Mục tiêu #{goal.id} có số dư dành riêng không hợp lệ.'})
+    if total_checked_savings != total_reserved_savings(db,u.id):
+        checks.append({'kind':'invalid_savings_total','detail':'Tổng tiền dành riêng không khớp sổ mục tiêu.'})
+    for mid,wuid,guid in db.execute(select(SavingsMovement.id,Wallet.user_id,SavingsGoal.user_id)
+            .outerjoin(Wallet,Wallet.id==SavingsMovement.wallet_id)
+            .outerjoin(SavingsGoal,SavingsGoal.id==SavingsMovement.goal_id)
+            .where(SavingsMovement.user_id==u.id)):
+        if wuid!=u.id or guid!=u.id:
+            checks.append({'kind':'invalid_savings_link','detail':f'Khoản dành riêng #{mid} liên kết ví/mục tiêu không hợp lệ.'})
     linked=db.execute(select(Entry.id,Entry.wallet_id,Wallet.user_id).outerjoin(Wallet,Entry.wallet_id==Wallet.id).where(Entry.user_id==u.id)).all()
     for eid,wid,wuid in linked:
         if wid is None or wuid!=u.id:
@@ -1333,6 +1413,110 @@ def undo_manual_payment(payment_id:int,u:User=Depends(current),db:Session=Depend
     db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'debt_payment_undone',f'#{payment_id}');db.commit();return {'ok':True}
 
+
+
+# v1.0.17 - Savings goals: ledger transfers between wallet availability and
+# reserved funds, never posted as earnings/expenses. Saved funds remain assets.
+def savings_goal_for(db: Session, user_id: int, goal_id: int, lock: bool = False) -> SavingsGoal:
+    stmt = select(SavingsGoal).where(SavingsGoal.id == goal_id, SavingsGoal.user_id == user_id)
+    if lock:
+        stmt = stmt.with_for_update()
+    goal = db.scalar(stmt)
+    if goal is None:
+        raise HTTPException(404, 'Không tìm thấy mục tiêu tiết kiệm.')
+    return goal
+
+
+def savings_goal_json(db: Session, goal: SavingsGoal) -> dict:
+    saved = savings_goal_balance(db, goal.id, goal.user_id)
+    return {'id': goal.id, 'name': goal.name, 'target_amount': goal.target_amount,
+            'saved_amount': saved, 'remaining_amount': max(0, goal.target_amount - saved),
+            'progress_pct': round(min(100, saved * 100 / goal.target_amount), 1),
+            'complete': saved >= goal.target_amount,
+            'due_date': goal.due_date.isoformat() if goal.due_date else None,
+            'note': goal.note, 'created_at': goal.created_at.isoformat()}
+
+
+@app.get('/api/savings')
+def list_savings(u: User = Depends(current), db: Session = Depends(get_db)):
+    goals = list(db.scalars(select(SavingsGoal).where(SavingsGoal.user_id == u.id).order_by(SavingsGoal.id.desc())))
+    items = [savings_goal_json(db, g) for g in goals]
+    moves = list(db.scalars(select(SavingsMovement).where(SavingsMovement.user_id == u.id)
+                            .order_by(SavingsMovement.occurred_on.desc(), SavingsMovement.id.desc()).limit(100)))
+    names = {g.id:g.name for g in goals}
+    wallets = {w.id:w.name for w in db.scalars(select(Wallet).where(Wallet.user_id == u.id))}
+    return {'items': items, 'total_saved': sum(g['saved_amount'] for g in items),
+            'total_targets': sum(g['target_amount'] for g in items),
+            'history': [{'id':m.id,'goal_id':m.goal_id,'goal':names.get(m.goal_id,''),
+                         'wallet_id':m.wallet_id,'wallet':wallets.get(m.wallet_id,''),
+                         'kind':m.kind,'amount':m.amount,'occurred_on':m.occurred_on.isoformat(),
+                         'note':m.note} for m in moves]}
+
+
+@app.post('/api/savings')
+def create_savings_goal(data: NewSavingsGoal, u: User = Depends(current), db: Session = Depends(get_db)):
+    account_locked(db, u.id)
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(422, 'Tên mục tiêu không được rỗng.')
+    target = check_amount(data.target_amount)
+    if data.due_date and data.due_date.year > 2099:
+        raise HTTPException(422, 'Ngày mục tiêu không hợp lệ.')
+    if (db.scalar(select(func.count(SavingsGoal.id)).where(SavingsGoal.user_id == u.id)) or 0) >= 50:
+        raise HTTPException(409, 'Mỗi tài khoản tối đa 50 mục tiêu.')
+    goal = SavingsGoal(user_id=u.id,name=name,target_amount=target,due_date=data.due_date,note=data.note.strip())
+    db.add(goal);db.flush();log(db,u.id,'savings_created',f'#{goal.id}: {name}');db.commit()
+    return savings_goal_json(db,goal)
+
+
+@app.put('/api/savings/{goal_id}')
+def update_savings_goal(goal_id: int, data: NewSavingsGoal, u: User = Depends(current), db: Session = Depends(get_db)):
+    account_locked(db,u.id)
+    goal = savings_goal_for(db,u.id,goal_id,True)
+    if not data.name.strip():
+        raise HTTPException(422,'Tên mục tiêu không được rỗng.')
+    target = check_amount(data.target_amount)
+    if target < savings_goal_balance(db,goal.id,u.id):
+        raise HTTPException(409,'Mục tiêu mới không thể nhỏ hơn số tiền đã dành riêng.')
+    goal.name=data.name.strip();goal.target_amount=target;goal.due_date=data.due_date;goal.note=data.note.strip()
+    log(db,u.id,'savings_updated',f'#{goal.id}');db.commit()
+    return savings_goal_json(db,goal)
+
+
+@app.delete('/api/savings/{goal_id}')
+def delete_savings_goal(goal_id: int, u: User = Depends(current), db: Session = Depends(get_db)):
+    account_locked(db,u.id)
+    goal = savings_goal_for(db,u.id,goal_id,True)
+    if savings_goal_balance(db,goal.id,u.id) != 0:
+        raise HTTPException(409,'Cần rút hết tiền dành riêng trước khi xóa mục tiêu.')
+    # Delete historical movements only when zero balance; logs preserve account-level audit.
+    db.query(SavingsMovement).filter(SavingsMovement.goal_id == goal.id, SavingsMovement.user_id == u.id).delete(synchronize_session=False)
+    db.delete(goal);log(db,u.id,'savings_deleted',f'#{goal_id}');db.commit()
+    return {'ok':True}
+
+
+@app.post('/api/savings/{goal_id}/movements')
+def move_savings(goal_id: int,data: NewSavingsMovement,u: User = Depends(current),db: Session = Depends(get_db)):
+    amount=check_amount(data.amount)
+    if data.occurred_on > date.today() + timedelta(days=366):
+        raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
+    account_locked(db,u.id)
+    goal=savings_goal_for(db,u.id,goal_id,True)
+    wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
+    saved=savings_goal_balance(db,goal.id,u.id)
+    if data.kind == 'deposit':
+        if amount > goal.target_amount - saved:
+            raise HTTPException(409,'Số tiền góp vượt mức mục tiêu còn thiếu.')
+        if wallet_balance(db,wallet) < amount:
+            raise HTTPException(409,'Ví không đủ tiền khả dụng để dành riêng.')
+    elif amount > saved:
+        raise HTTPException(409,'Không thể rút quá tiền đã dành riêng trong mục tiêu.')
+    move=SavingsMovement(user_id=u.id,goal_id=goal.id,wallet_id=wallet.id,
+                         kind=data.kind,amount=amount,occurred_on=data.occurred_on,note=data.note.strip())
+    db.add(move);db.flush();ensure_nonnegative(db,u.id)
+    log(db,u.id,'savings_'+data.kind,f'#{goal.id} wallet:{wallet.id} {amount}')
+    db.commit()
+    return {'ok':True,'movement_id':move.id,'saved_amount':savings_goal_balance(db,goal.id,u.id)}
 
 @app.get('/api/wallets')
 def list_wallets(u:User=Depends(current),db:Session=Depends(get_db)):
@@ -1785,11 +1969,12 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     budgets=list_budgets(month,u,db)
     ids=[e.id for e in recent]
     allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
-    return {'balance':balance,'opening_balance':default_wallet(db,u.id).opening_balance,'total_opening_balance':sum(w.opening_balance for w in wallets),'wallet_count':len(wallets),'wallets':[wallet_json(db,w) for w in wallets],'total_income':all_income,'total_expense':all_expense,
+    savings_reserved=total_reserved_savings(db,u.id)
+    return {'savings_reserved':savings_reserved,'total_assets':balance+savings_reserved,'balance':balance,'opening_balance':default_wallet(db,u.id).opening_balance,'total_opening_balance':sum(w.opening_balance for w in wallets),'wallet_count':len(wallets),'wallets':[wallet_json(db,w) for w in wallets],'total_income':all_income,'total_expense':all_expense,
             'month_income':inc,'month_expense':exp,'month_count':len(month_entries),'net':inc-exp,
             'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in recent],
             'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
-            'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance-debt_remaining+receivable_remaining}
+            'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance+savings_reserved-debt_remaining+receivable_remaining}
 
 
 @app.get('/api/reports')
@@ -1921,6 +2106,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
     db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
+    db.query(SavingsMovement).filter(SavingsMovement.user_id==target.id).delete(synchronize_session=False)
+    db.query(SavingsGoal).filter(SavingsGoal.user_id==target.id).delete(synchronize_session=False)
     db.query(Wallet).filter(Wallet.user_id==target.id).delete(synchronize_session=False)
     db.query(Category).filter(Category.user_id==target.id).delete(synchronize_session=False)
     db.query(Audit).filter(Audit.actor_id==target.id).update({Audit.actor_id:None},synchronize_session=False)

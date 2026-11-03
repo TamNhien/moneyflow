@@ -34,7 +34,7 @@ def report_months(end: str, count: int):
 
 def build_report(db, user_id: int, end: str, count: int):
     from backend.app import (Category, Entry, Debt, DebtPayment, Wallet, WalletTransfer,
-                             wallet_balance, current_balance)
+                             wallet_balance, current_balance, total_reserved_savings)
     months, start, until = report_months(end, count)
     trend = {key: dict(month=key, income=0, expense=0,
                        payable_principal=0, payable_interest=0,
@@ -74,6 +74,7 @@ def build_report(db, user_id: int, end: str, count: int):
                       'percentage': round((selected[k] - previous[k]) * 100 / abs(previous[k]), 1) if previous[k] else None}
                   for k in ('income','expense','debt_paid','debt_collected','net_cash')}
     cash, _, _ = current_balance(db, user_id)
+    saved_funds = total_reserved_savings(db, user_id)
     debts = list(db.scalars(select(Debt).where(Debt.user_id == user_id)))
     payable = sum(int(d.remaining) for d in debts if d.direction == 'payable')
     receivable = sum(int(d.remaining) for d in debts if d.direction == 'receivable')
@@ -100,8 +101,8 @@ def build_report(db, user_id: int, end: str, count: int):
     return {'end_month':end, 'months_count':count, 'from_month':months[0], 'to_month':months[-1],
             'monthly':[trend[m] for m in months], 'totals':total,
             'selected_month':selected, 'comparison':comparison,
-            'snapshot':{'cash_balance':cash,'payable':payable,'receivable':receivable,
-                        'net_worth':cash + receivable - payable,
+            'snapshot':{'cash_balance':cash,'savings_balance':saved_funds,'total_assets':cash+saved_funds,'payable':payable,'receivable':receivable,
+                        'net_worth':cash + saved_funds + receivable - payable,
                         'wallets':[{'name':w.name, 'kind':w.kind, 'balance':wallet_balance(db,w)} for w in wallets]},
             'categories':category_rows, 'transactions':transaction_rows, 'payments':payment_rows,
             'transfer_count':len(transfers), 'transfer_amount':sum(int(t.amount) for t in transfers)}
@@ -156,7 +157,7 @@ def excel_bytes(data):
         ('Tổng thu nhập',t['income']),('Chi tiêu',t['expense']),
         ('Trả nợ gốc + lãi',t['debt_paid']),('Thu hồi nợ gốc + lãi',t['debt_collected']),
         ('Dòng tiền thuần trong kỳ',t['net_cash']),
-        ('Số dư các ví hiện tại',s['cash_balance']),('Nợ phải thu hiện tại',s['receivable']),
+        ('Số dư khả dụng trong ví',s['cash_balance']),('Tiết kiệm dành riêng',s['savings_balance']),('Nợ phải thu hiện tại',s['receivable']),
         ('Nợ phải trả hiện tại',s['payable']),('Tài sản ròng hiện tại',s['net_worth']),
         ('Chuyển ví nội bộ (không tính vào dòng tiền)',data['transfer_amount'])],
         widths={1:49,2:34},money_cols=(2,))
@@ -228,7 +229,7 @@ def pdf_bytes(data):
         ('Biến động tiền thuần trong kỳ',t['net_cash'])], [96*mm,78*mm],(1,)))
     story.append(Paragraph('Tình hình tài chính hiện tại',section))
     story.append(table(['Chỉ tiêu','Giá trị'],[
-        ('Số dư các ví',s['cash_balance']),('Nợ phải thu',s['receivable']),
+        ('Số dư khả dụng các ví',s['cash_balance']),('Tiết kiệm dành riêng',s['savings_balance']),('Nợ phải thu',s['receivable']),
         ('Nợ phải trả',s['payable']),('Tài sản ròng',s['net_worth'])], [96*mm,78*mm],(1,)))
     story.append(Paragraph('Biến động thu và chi theo tháng',section))
     monthly=data['monthly'];maximum=max(1,*[max(r['income'],r['expense']) for r in monthly])

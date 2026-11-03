@@ -707,3 +707,73 @@ def test_export_controls_are_unambiguous():
     assert 'Xuất Excel <small>.XLSX</small>' in source
     assert 'Xuất PDF <small>.PDF</small>' in source
     assert "downloadReport('xlsx')" in source and "downloadReport('pdf')" in source
+
+
+def test_savings_goals_reserved_funds_and_user_isolation(client):
+    # Register a separate user so this test cannot affect existing finance tests.
+    login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert login.status_code==200,login.text
+    admin_csrf=login.json()['csrf_token']
+    created=auth_post(client,'/api/users',credentials('saver117'),csrf=admin_csrf)
+    assert created.status_code==200,created.text
+    assert auth_post(client,'/api/logout',csrf=admin_csrf).status_code==200
+    login=auth_post(client,'/api/login',{'username':'saver117','password':'SecurePassword@12345'})
+    assert login.status_code==200,login.text
+    csrf=login.json()['csrf_token']
+    opening=auth_post(client,'/api/opening-balance',{'opening_balance':1_000_000},method='put',csrf=csrf)
+    assert opening.status_code==200,opening.text
+    wallet_1=client.get('/api/wallets').json()['items'][0]['id']
+    wallet_2=auth_post(client,'/api/wallets',{'name':'Ngân hàng','kind':'bank','opening_balance':0},csrf=csrf).json()['id']
+    transfer=auth_post(client,'/api/wallet-transfers',{'from_wallet_id':wallet_1,'to_wallet_id':wallet_2,'amount':300000,'occurred_on':'2026-11-03'},csrf=csrf)
+    assert transfer.status_code==200,transfer.text
+    new=auth_post(client,'/api/savings',{'name':'Quỹ dự phòng','target_amount':400000,'note':'Tài sản dành riêng'},csrf=csrf)
+    assert new.status_code==200,new.text
+    gid=new.json()['id']
+    assert auth_post(client,f'/api/savings/{gid}/movements',{'kind':'deposit','wallet_id':wallet_1,'amount':200000},csrf=csrf).status_code==200
+    assert auth_post(client,f'/api/savings/{gid}/movements',{'kind':'deposit','wallet_id':wallet_2,'amount':100000},csrf=csrf).status_code==200
+    savings=client.get('/api/savings').json()
+    assert savings['total_saved']==300000
+    assert savings['items'][0]['progress_pct']==75.0
+    assert len(savings['history'])==2
+    balances={w['id']:w['balance'] for w in client.get('/api/wallets').json()['items']}
+    assert balances=={wallet_1:500000,wallet_2:200000}
+    dashboard=client.get('/api/dashboard?month=2026-11').json()
+    assert dashboard['balance']==700000 and dashboard['savings_reserved']==300000
+    assert dashboard['total_assets']==1_000_000 and dashboard['net_worth']==1_000_000
+    report=client.get('/api/reports?end=2026-11&months=3').json()
+    assert report['snapshot']['savings_balance']==300000
+    assert report['snapshot']['net_worth']==1_000_000
+    assert report['totals']['net_cash']==0  # internal movements are not income/expense
+    from io import BytesIO
+    from openpyxl import load_workbook
+    xls=client.get('/api/reports.xlsx?end=2026-11&months=3')
+    assert xls.status_code==200 and xls.content.startswith(b'PK')
+    wb=load_workbook(BytesIO(xls.content),read_only=True,data_only=True)
+    assert any(row[0]=='Tiết kiệm dành riêng' and row[1]==300000 for row in wb['Tổng quan'].values)
+    wb.close()
+    pdf=client.get('/api/reports.pdf?end=2026-11&months=3')
+    assert pdf.status_code==200 and pdf.content.startswith(b'%PDF')
+    assert auth_post(client,f'/api/savings/{gid}/movements',{'kind':'deposit','wallet_id':wallet_1,'amount':100001},csrf=csrf).status_code==409
+    assert auth_post(client,f'/api/savings/{gid}/movements',{'kind':'withdraw','wallet_id':wallet_1,'amount':300001},csrf=csrf).status_code==409
+    assert auth_post(client,f'/api/savings/{gid}',{'name':'Small','target_amount':200000},csrf=csrf,method='put').status_code==409
+    assert auth_post(client,f'/api/savings/{gid}',csrf=csrf,method='delete').status_code==409
+    withdraw=auth_post(client,f'/api/savings/{gid}/movements',{'kind':'withdraw','wallet_id':wallet_2,'amount':150000},csrf=csrf)
+    assert withdraw.status_code==200,withdraw.text
+    assert client.get('/api/dashboard?month=2026-11').json()['net_worth']==1_000_000
+    assert client.get('/api/savings').json()['total_saved']==150000
+    assert auth_post(client,'/api/logout',csrf=csrf).status_code==200
+    owner=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert owner.status_code==200,owner.text
+    owner_csrf=owner.json()['csrf_token']
+    assert not any(g['id']==gid for g in client.get('/api/savings').json()['items'])
+    assert auth_post(client,f'/api/savings/{gid}/movements',{'kind':'withdraw','wallet_id':wallet_1,'amount':100},csrf=owner_csrf).status_code==404
+    assert auth_post(client,f'/api/savings/{gid}',{'name':'Tampered','target_amount':150000},csrf=owner_csrf,method='put').status_code==404
+    assert auth_post(client,'/api/logout',csrf=owner_csrf).status_code==200
+    saver=auth_post(client,'/api/login',{'username':'saver117','password':'SecurePassword@12345'})
+    assert saver.status_code==200,saver.text
+    csrf=saver.json()['csrf_token']
+    assert auth_post(client,f'/api/savings/{gid}/movements',{'kind':'withdraw','wallet_id':wallet_1,'amount':150000},csrf=csrf).status_code==200
+    assert auth_post(client,f'/api/savings/{gid}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/savings').json()['total_saved']==0
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==1_000_000
+    assert client.get('/api/security/integrity').status_code==200

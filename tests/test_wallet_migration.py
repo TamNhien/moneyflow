@@ -32,7 +32,7 @@ def test_legacy_wallet_migration_is_idempotent(tmp_path):
     root = Path(__file__).resolve().parents[1]
     env = {**os.environ, 'DATABASE_URL': 'sqlite:///' + str(db_file), 'PYTHONPATH': str(root)}
     script = '''from fastapi.testclient import TestClient
-from backend.app import app, SessionLocal, Wallet, Entry, Debt, DebtPayment, wallet_balance, current_balance, debt_schedule_rows, RecurringRule, RecurringRun
+from backend.app import app, SessionLocal, Wallet, Entry, Debt, DebtPayment, wallet_balance, current_balance, debt_schedule_rows, RecurringRule, RecurringRun, SavingsGoal, SavingsMovement
 from sqlalchemy import select
 with TestClient(app):
  with SessionLocal() as db:
@@ -47,6 +47,8 @@ with TestClient(app):
   assert debt_schedule_rows(d)[0]['principal']==15000
   assert list(db.scalars(select(RecurringRule)))==[]
   assert list(db.scalars(select(RecurringRun)))==[]
+  assert list(db.scalars(select(SavingsGoal)))==[]
+  assert list(db.scalars(select(SavingsMovement)))==[]
   p=db.scalar(select(DebtPayment).where(DebtPayment.id==6))
   assert p.interest_amount==0
 '''
@@ -79,7 +81,7 @@ def test_v115_user_and_session_columns_upgrade_without_data_loss(tmp_path):
     env={**os.environ,'DATABASE_URL':'sqlite:///'+str(database),'PYTHONPATH':str(root)}
     code='''from fastapi.testclient import TestClient
 from sqlalchemy import select
-from backend.app import app,SessionLocal,User,AuthSession,Wallet
+from backend.app import app,SessionLocal,User,AuthSession,Wallet,SavingsGoal,SavingsMovement
 with TestClient(app):
  with SessionLocal() as db:
   u=db.get(User,33)
@@ -89,6 +91,7 @@ with TestClient(app):
   assert old.user_id==33
   assert old.user_agent==''
   assert len(list(db.scalars(select(Wallet).where(Wallet.user_id==33))))==1
+  assert list(db.scalars(select(SavingsGoal)))==[] and list(db.scalars(select(SavingsMovement)))==[]
 '''
     for _ in range(2):
         result=subprocess.run([sys.executable,'-c',code],cwd=root,env=env,capture_output=True,text=True,timeout=30)
