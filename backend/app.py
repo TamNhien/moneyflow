@@ -1977,6 +1977,144 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
             'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance+savings_reserved-debt_remaining+receivable_remaining}
 
 
+# v1.0.18 – Read-only scenario forecast based ONLY on registered recurring rules.
+# This is not a transaction ledger, bank integration, or automatic debt payment.
+def forecast_rule_date(rule: RecurringRule, index: int) -> date:
+    if rule.frequency == 'daily':
+        return rule.start_on + timedelta(days=index)
+    if rule.frequency == 'weekly':
+        return rule.start_on + timedelta(weeks=index)
+    if rule.frequency in ('monthly', 'yearly'):
+        return add_months_clamped(rule.start_on, index * (12 if rule.frequency == 'yearly' else 1))
+    raise ValueError('Tần suất không hợp lệ.')
+
+
+def forecast_due_dates(rule: RecurringRule, start: date, finish: date):
+    """Non-mutating recurrence iterator; use next_index to exclude posted/skipped periods.
+
+    Skip old occurrences efficiently to bound forecast work even for daily rules
+    created many years ago. An overdue first period is a warning, NOT projected
+    as if it had already been paid today.
+    """
+    index = max(0, int(rule.next_index or 0))
+    if rule.frequency in ('daily', 'weekly'):
+        days_per = 1 if rule.frequency == 'daily' else 7
+        delta = (start - rule.start_on).days
+        index = max(index, max(0, (delta + days_per - 1) // days_per))
+    else:
+        delta_months = (start.year-rule.start_on.year)*12 + start.month-rule.start_on.month
+        step = 12 if rule.frequency == 'yearly' else 1
+        index = max(index, max(0, delta_months // step - 1))
+    # At most 91 days' events; no database writes or scheduler side effects.
+    for _ in range(110):
+        try:
+            due = forecast_rule_date(rule,index)
+        except (OverflowError,ValueError):
+            return
+        if due > finish:
+            return
+        if due >= start:
+            yield due
+        index += 1
+
+
+def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
+                          as_of: date | None = None) -> dict:
+    if horizon_days not in (30,60,90):
+        raise HTTPException(422,'Chỉ hỗ trợ dự báo 30, 60 hoặc 90 ngày.')
+    start=as_of or date.today()
+    finish=start+timedelta(days=horizon_days)
+    wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==user_id).order_by(Wallet.id)))
+    wallet_info={w.id:{'id':w.id,'name':w.name,'active':w.active,
+        'start_balance':wallet_balance(db,w),'projected_balance':wallet_balance(db,w),
+        'lowest_balance':wallet_balance(db,w),'first_shortfall_on':None} for w in wallets}
+    debt_balances=[int(d.remaining) for d in db.scalars(select(Debt).where(
+        Debt.user_id==user_id,Debt.direction=='payable',Debt.remaining>0).order_by(Debt.id))]
+    rules=list(db.scalars(select(RecurringRule).where(
+        RecurringRule.user_id==user_id, RecurringRule.active==True).order_by(RecurringRule.id)))
+    pending_past=[];paused_wallet_rules=[];planned=[]
+    for rule in rules:
+        wallet=wallet_info.get(rule.wallet_id)
+        if not wallet or not wallet['active']:
+            paused_wallet_rules.append({'id':rule.id,'title':rule.title})
+            continue
+        if forecast_rule_date(rule,int(rule.next_index or 0)) < start:
+            pending_past.append({'id':rule.id,'title':rule.title,
+                                 'due_on':forecast_rule_date(rule,int(rule.next_index or 0)).isoformat()})
+        for due in forecast_due_dates(rule,start,finish):
+            planned.append((due,0 if rule.kind=='income' else 1,rule.id,rule))
+    planned.sort(key=lambda row:(row[0],row[1],row[2]))
+    by_day=defaultdict(list)
+    for due,_,__,rule in planned:by_day[due].append(rule)
+    events=[];timeline=[];total_income=total_expense=total_debt=0
+    first_shortfall_on=None
+    min_total=sum(w['start_balance'] for w in wallet_info.values())
+    for offset in range(horizon_days+1):
+        day=start+timedelta(days=offset)
+        income=expense=debt_paid=0
+        for rule in by_day.get(day,[]):
+            wallet=wallet_info[rule.wallet_id]
+            gross=int(rule.amount)
+            allocated=0
+            if rule.kind=='income':
+                income+=gross
+                remainder=gross
+                for ix,amount in enumerate(debt_balances):
+                    if not remainder:break
+                    repay=min(remainder,amount)
+                    debt_balances[ix]-=repay
+                    remainder-=repay
+                    allocated+=repay
+                debt_paid+=allocated
+                delta=gross-allocated
+            else:
+                expense+=gross
+                delta=-gross
+            wallet['projected_balance']+=delta
+            events.append({'due_on':day.isoformat(),'title':rule.title,'rule_id':rule.id,
+                           'wallet_id':rule.wallet_id,'wallet_name':wallet['name'],'kind':rule.kind,
+                           'mode':rule.mode,'amount':gross,'allocated_to_debt':allocated,
+                           'net_wallet_delta':delta,'wallet_after':wallet['projected_balance']})
+        total_income+=income;total_expense+=expense;total_debt+=debt_paid
+        total=sum(w['projected_balance'] for w in wallet_info.values())
+        min_total=min(min_total,total)
+        risk=False
+        for wallet in wallet_info.values():
+            wallet['lowest_balance']=min(wallet['lowest_balance'],wallet['projected_balance'])
+            if wallet['projected_balance']<0:
+                risk=True
+                if wallet['first_shortfall_on'] is None:
+                    wallet['first_shortfall_on']=day.isoformat()
+        if risk and first_shortfall_on is None:first_shortfall_on=day.isoformat()
+        timeline.append({'date':day.isoformat(),'balance':total,'income':income,
+                         'expense':expense,'debt_paid':debt_paid,'shortfall':risk})
+    start_balance=sum(w['start_balance'] for w in wallet_info.values())
+    end_balance=sum(w['projected_balance'] for w in wallet_info.values())
+    return {'as_of':start.isoformat(),'through':finish.isoformat(),'horizon_days':horizon_days,
+            'start_balance':start_balance,'end_balance':end_balance,
+            'net_change':end_balance-start_balance,'income_gross':total_income,
+            'expense':total_expense,'debt_allocated':total_debt,
+            'min_total_balance':min_total,'first_shortfall_on':first_shortfall_on,
+            'risk_wallet_count':sum(1 for w in wallet_info.values() if w['first_shortfall_on']),
+            'overdue_rules':pending_past,'inactive_wallet_rules':paused_wallet_rules,
+            'payable_remaining_scenario':sum(debt_balances),
+            'wallets':list(wallet_info.values()),'timeline':timeline,
+            'total_events':len(events),'events':events[:160],
+            'truncated_events':len(events)>160,
+            'assumptions':['Chỉ dự báo lịch định kỳ đang hoạt động; không tự tạo giao dịch.',
+                           'Khoản thu dự kiến ưu tiên trả nợ gốc phải trả trước khi vào ví.',
+                           'Lịch trả góp/nợ đến hạn chỉ là nhắc nhở, không tự trừ thêm.',
+                           'Các khoản chuyển ví và góp/rút quỹ tiết kiệm không phải thu chi.',
+                           'Chi vượt số dư được cảnh báo; ứng dụng thực tế vẫn chặn ghi âm ví.']}
+
+
+@app.get('/api/forecast')
+def cash_forecast(response: Response, days: int = 30,
+                  u: User = Depends(current), db: Session = Depends(get_db)):
+    response.headers['Cache-Control']='no-store'
+    return compute_cash_forecast(db,u.id,days)
+
+
 @app.get('/api/reports')
 def reports(end: str, response: Response, months: int = 12, u: User = Depends(current), db: Session = Depends(get_db)):
     from backend.reporting import build_report, as_public_report

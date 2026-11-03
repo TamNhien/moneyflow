@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.17
+# MoneyFlow Local v1.0.18
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -65,6 +65,15 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ các volume Docker để không mất database và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.18 — Dự báo dòng tiền và cảnh báo thiếu tiền (đọc, không ghi dữ liệu)
+
+- Thêm trang **Dự báo dòng tiền**: xem 30/60/90 ngày theo các lịch thu/chi định kỳ còn hoạt động. Hiển thị đường dự kiến tổng số dư khả dụng, các kỳ thu/chi, số dư dự kiến cuối kỳ và từng ví.
+- Các khoản thu dự kiến được mô phỏng **ưu tiên trả nợ gốc phải trả** theo thứ tự nợ cũ trước; chỉ phần dư mới vào ví. Không giả lập tự trả lãi, thu hồi nợ hay chuyển khoản bên ngoài; nợ đến hạn tiếp tục nằm trong khu vực nhắc lịch và **không bị trừ thêm** trong dự báo.
+- Phát hiện nguy cơ **âm từng ví**, kể cả khi tổng số dư các ví còn dương; đánh dấu ngày đầu có rủi ro. Dữ liệu thật **không bị sửa**, kể cả khi số dư dự kiến âm; quy tắc chặn chi vượt tiền vẫn hoạt động như trước.
+- Những kỳ quá hạn chưa xử lý được báo riêng, không giả vờ đã thanh toán hôm nay. Lịch gắn ví đang khóa được cảnh báo và loại khỏi dự báo. Chuyển tiền nội bộ và góp/rút quỹ tiết kiệm không bị nhận nhầm thành thu/chi.
+- API chỉ đọc `GET /api/forecast?days=30|60|90`, yêu cầu đăng nhập; trả header `Cache-Control: no-store`. Không thay schema database và không tạo giao dịch; các mốc dự báo phụ thuộc vào giả định lịch sẽ diễn ra đúng hạn, không phải cam kết số dư thực tế.
+- Trường hợp dự báo quá nhiều kỳ, API chỉ gửi 160 kỳ đầu tiên cho bảng chi tiết; các chỉ số tổng và biểu đồ vẫn tính tất cả. Bộ kiểm thử bao gồm cách tính trả nợ, rủi ro theo ví, chặn truy cập chéo tài khoản và kiểm tra API không làm thay đổi dữ liệu.
 
 ## v1.0.14 — Giao dịch định kỳ và nhắc lịch trong ứng dụng
 
@@ -249,5 +258,7 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | **v1.0.15** | **Báo cáo theo 3/6/12/24 tháng, so sánh thu chi, tính dòng tiền có xét trả/thu hồi nợ và loại trừ chuyển ví nội bộ; tổng tài sản ròng hiện tại; xuất Excel 6 sheet và PDF tiếng Việt; kiểm thử API và frontend cho báo cáo.** |
 | **v1.0.16** | **Phân biệt trực quan nút Excel/PDF, xác nhận MIME/chữ ký tệp; TOTP Authenticator có QR, mã dự phòng một lần, mã hóa bí mật trong DB, khóa sau nhiều lần nhập sai, quản lý phiên, kiểm tra nhất quán dữ liệu và migration không mất tài khoản cũ.** |
 | **v1.0.17** | **Mục tiêu tiết kiệm: góp/rút từ các ví, quỹ dành riêng không tính thu chi, tiến độ và hạn dự kiến, quản lý nhiều mục tiêu, phân quyền, kiểm tra sổ tiền, báo cáo tài sản ròng tính cả tiền tiết kiệm.** |
+
+| **v1.0.18** | **Dự báo dòng tiền 30/60/90 ngày từ lịch định kỳ, phân bổ trả nợ gốc theo thu nhập, phát hiện nguy cơ âm từng ví và cảnh báo kỳ quá hạn, API chỉ đọc không thay số dư.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

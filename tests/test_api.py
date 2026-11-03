@@ -777,3 +777,101 @@ def test_savings_goals_reserved_funds_and_user_isolation(client):
     assert client.get('/api/savings').json()['total_saved']==0
     assert client.get('/api/dashboard?month=2026-11').json()['balance']==1_000_000
     assert client.get('/api/security/integrity').status_code==200
+
+
+def test_forecast_read_only_wallet_risk_and_debt_allocation(client):
+    """Scenario simulation is isolated per account and must not post real entries."""
+    from datetime import date, timedelta
+    from sqlalchemy import select, func
+    from backend.app import (SessionLocal, User, Wallet, RecurringRule, Category,
+                             Debt, Entry, compute_cash_forecast)
+    start=date.today()
+    with SessionLocal() as db:
+        u=User(username='forecast_test_owner', display_name='forecast_test_owner',
+               password_hash='not-used', email='forecast_test_owner@example.com',
+               phone='0907777888',address='Local test',role='member',active=True,opening_balance=0)
+        db.add(u); db.flush()
+        w=Wallet(user_id=u.id,name='Ví thu chi',kind='bank',opening_balance=100000,
+                 is_default=True,active=True)
+        other=Wallet(user_id=u.id,name='Ví dự phòng',kind='cash',opening_balance=200000,
+                     is_default=False,active=True)
+        db.add_all([w,other]);db.flush()
+        inc=Category(user_id=u.id,name='Dự báo lương',kind='income',color='#00BFA6')
+        exp=Category(user_id=u.id,name='Dự báo nhà',kind='expense',color='#FFB870')
+        db.add_all([inc,exp]); db.flush()
+        due_income=start+timedelta(days=2)
+        due_expense=start+timedelta(days=3)
+        debt=Debt(user_id=u.id,name='Nợ dùng thử',principal=50000,remaining=50000,
+                  direction='payable',annual_rate_bps=0,installment_count=1)
+        rule_income=RecurringRule(user_id=u.id,wallet_id=w.id,category_id=inc.id,
+                    title='Lương dự kiến',kind='income',amount=70000,note='',frequency='monthly',
+                    start_on=due_income,next_index=0,mode='manual',remind_days=3,active=True)
+        rule_expense=RecurringRule(user_id=u.id,wallet_id=w.id,category_id=exp.id,
+                    title='Tiền nhà',kind='expense',amount=150000,note='',frequency='monthly',
+                    start_on=due_expense,next_index=0,mode='manual',remind_days=3,active=True)
+        paused=RecurringRule(user_id=u.id,wallet_id=w.id,category_id=exp.id,
+                    title='Lịch đã dừng',kind='expense',amount=999999,note='',frequency='daily',
+                    start_on=start,next_index=0,mode='auto',remind_days=3,active=False)
+        overdue=RecurringRule(user_id=u.id,wallet_id=other.id,category_id=exp.id,
+                    title='Hóa đơn quá hạn',kind='expense',amount=1000,note='',frequency='yearly',
+                    start_on=start-timedelta(days=3),next_index=0,mode='manual',remind_days=3,active=True)
+        db.add_all([debt,rule_income,rule_expense,paused,overdue]);db.commit()
+        before_entries=db.scalar(select(func.count()).select_from(Entry).where(Entry.user_id==u.id))
+        result=compute_cash_forecast(db,u.id,30,start)
+        assert result['start_balance']==300000
+        assert result['income_gross']==70000
+        assert result['debt_allocated']==50000
+        assert result['expense']==150000
+        assert result['end_balance']==170000
+        assert result['net_change']==-130000
+        assert result['risk_wallet_count']==1  # one wallet -30,000, another +200,000
+        assert result['first_shortfall_on']==due_expense.isoformat()
+        assert result['wallets'][0]['projected_balance']==-30000
+        assert result['wallets'][1]['projected_balance']==200000
+        assert result['events'][0]['net_wallet_delta']==20000
+        assert result['events'][0]['allocated_to_debt']==50000
+        assert result['events'][1]['net_wallet_delta']==-150000
+        assert result['payable_remaining_scenario']==0
+        assert result['overdue_rules'][0]['title']=='Hóa đơn quá hạn'
+        assert db.get(Debt,debt.id).remaining==50000
+        assert db.get(RecurringRule,rule_income.id).next_index==0
+        assert db.scalar(select(func.count()).select_from(Entry).where(Entry.user_id==u.id))==before_entries
+        assert len(result['timeline'])==31
+        with pytest.raises(Exception) as exc:
+            compute_cash_forecast(db,u.id,91,start)
+        assert '422' in str(exc.value)
+        db.rollback()
+
+
+def test_forecast_endpoint_auth_filter_and_range(client):
+    # User from existing integration tests is whichever account remains authenticated.
+    # The endpoint must never expose cross-user wallet data to the active account.
+    from backend.app import SessionLocal, User, Wallet
+    from sqlalchemy import select
+    with SessionLocal() as db:
+        target=db.scalar(select(User).where(User.username=='forecast_test_owner'))
+        assert target is not None
+        owned_wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==target.id)))
+    assert len(owned_wallets)==2
+    # Login test user through the existing local flow uses an independent account.
+    r=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert r.status_code==200,r.text
+    ok=client.get('/api/forecast?days=30')
+    assert ok.status_code==200,ok.text
+    body=ok.json()
+    assert body['horizon_days']==30
+    assert all(w['name'] not in ('Ví thu chi','Ví dự phòng') for w in body['wallets'])
+    assert ok.headers.get('cache-control')=='no-store'
+    assert client.get('/api/forecast?days=45').status_code==422
+
+
+def test_forecast_clamped_months_and_no_duplicate_periods(client):
+    from datetime import date
+    from backend.app import RecurringRule, forecast_due_dates
+    rule=RecurringRule(user_id=1,wallet_id=1,category_id=1,
+           title='Ngày 31',kind='expense',amount=1,frequency='monthly',
+           start_on=date(2026,1,31),next_index=1,mode='manual',remind_days=3,active=True)
+    dates=list(forecast_due_dates(rule,date(2026,2,1),date(2026,4,30)))
+    assert dates==[date(2026,2,28),date(2026,3,31),date(2026,4,30)]
+    rule.next_index=2
+    assert list(forecast_due_dates(rule,date(2026,2,1),date(2026,4,30)))==dates[1:]

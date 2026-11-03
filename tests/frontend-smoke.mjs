@@ -60,6 +60,7 @@ const responses = {
   'budgets': [], 'debts': debtData, 'users': [fakeUser],
   'recurring': {items:[],history:[]}, 'reminders': {items:[],overdue_count:0,upcoming_count:0},
   'reports': {end_month:'2026-11',from_month:'2025-12',to_month:'2026-11',months_count:12,totals:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},snapshot:{cash_balance:100000,payable:0,receivable:0,net_worth:100000},selected_month:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},comparison:{income:{current:100,previous:0,difference:100,percentage:null},expense:{current:40,previous:0,difference:40,percentage:null},net_cash:{current:60,previous:0,difference:60,percentage:null}},monthly:Array.from({length:12},(_,i)=>({month:`2026-${String(i+1).padStart(2,'0')}`,income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60})),categories:[{name:'Ăn uống',color:'#6475ff',amount:40}],transfer_count:0},
+  'forecast': {as_of:'2026-11-03',through:'2026-12-03',horizon_days:30,start_balance:100000,end_balance:45000,net_change:-55000,income_gross:30000,expense:75000,debt_allocated:10000,min_total_balance:45000,first_shortfall_on:null,risk_wallet_count:0,overdue_rules:[],inactive_wallet_rules:[],payable_remaining_scenario:0,wallets:[{id:1,name:'Ví chính',active:true,start_balance:100000,projected_balance:45000,lowest_balance:45000,first_shortfall_on:null}],timeline:Array.from({length:31},(_,i)=>({date:`2026-11-${String(i+3).padStart(2,'0')}`,balance:100000-i*1000,income:0,expense:0,debt_paid:0,shortfall:false})),total_events:2,events:[{due_on:'2026-11-20',title:'Lương',wallet_name:'Ví chính',kind:'income',mode:'manual',amount:30000,allocated_to_debt:10000,net_wallet_delta:20000}] ,truncated_events:false,assumptions:['Chỉ dự báo lịch định kỳ đang hoạt động.']},
   'audit': [{ id: 1, at: '2026-11-02T10:00:00Z', actor: 'owner', action: 'login', detail: 'OK' }],
 };
 async function fetchMock(path) {
@@ -87,7 +88,7 @@ assert.match(element('#page-content').innerHTML, /Xin chào/, 'Initial dashboard
 assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup data was not fetched');
 
 const pages = [
-  ['dashboard', 'Xin chào'], ['savings', 'Mục tiêu tiết kiệm'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
+  ['dashboard', 'Xin chào'], ['forecast','Dự báo dòng tiền'], ['savings', 'Mục tiêu tiết kiệm'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
   ['transactions', 'Quản lý giao dịch'], ['budgets', 'Ngân sách chi tiêu'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
@@ -143,3 +144,9 @@ assert.match(element('#modal-root').innerHTML, /Góp tiền vào mục tiêu/);
 await runInContext('savingsMoveModal(state.savingsData.items[0], "withdraw")', context);
 assert.match(element('#modal-root').innerHTML, /Rút tiền về ví/);
 console.log('Savings goals modal smoke PASS: create/edit, deposit and withdraw.');
+
+await runInContext('navigate("forecast")',context);
+assert.match(element('#page-content').innerHTML,/forecast-chart/);
+assert.match(element('#page-content').innerHTML,/Số dư dự kiến cuối kỳ/);
+assert.match(element('#page-content').innerHTML,/name=""|forecast-days/);
+console.log('Forecast smoke PASS: 30-day projection cards, SVG chart and wallet risk panels.');
