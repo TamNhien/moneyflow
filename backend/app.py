@@ -142,6 +142,32 @@ class SavingsMovement(Base):
                       CheckConstraint("kind IN ('deposit', 'withdraw')", name='ck_savings_move_kind'))
 
 
+class StashFund(Base):
+    """Money set aside without a target/limit. Separate from goal-based savings."""
+    __tablename__ = 'stash_funds'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    note: Mapped[str] = mapped_column(String(300), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class StashMovement(Base):
+    """Immutable deposits/withdrawals. Never recorded as income or expense."""
+    __tablename__ = 'stash_movements'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    fund_id: Mapped[int] = mapped_column(ForeignKey('stash_funds.id'), index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(10))
+    amount: Mapped[int] = mapped_column(BigInteger)
+    occurred_on: Mapped[date] = mapped_column(Date, index=True)
+    note: Mapped[str] = mapped_column(String(300), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('amount > 0', name='ck_stash_move_positive'),
+                      CheckConstraint("kind IN ('deposit', 'withdraw')", name='ck_stash_move_kind'))
+
+
 class Category(Base):
     __tablename__ = 'categories'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -558,7 +584,15 @@ def wallet_balance(db: Session, wallet: Wallet) -> int:
     savings_allocated = db.scalar(select(func.coalesce(func.sum(SavingsMovement.amount), 0)).where(
         SavingsMovement.user_id == user_id, SavingsMovement.wallet_id == wallet_id,
         SavingsMovement.kind == 'deposit')) or 0
-    return int(wallet.opening_balance) + int(income) - int(expense) + int(debt_delta) + int(incoming) - int(outgoing) + int(savings_delta) - int(savings_allocated)
+    stash_withdrawn = db.scalar(select(func.coalesce(func.sum(StashMovement.amount), 0)).where(
+        StashMovement.user_id == user_id, StashMovement.wallet_id == wallet_id,
+        StashMovement.kind == 'withdraw')) or 0
+    stash_deposited = db.scalar(select(func.coalesce(func.sum(StashMovement.amount), 0)).where(
+        StashMovement.user_id == user_id, StashMovement.wallet_id == wallet_id,
+        StashMovement.kind == 'deposit')) or 0
+    return (int(wallet.opening_balance) + int(income) - int(expense) + int(debt_delta)
+            + int(incoming) - int(outgoing) + int(savings_delta) - int(savings_allocated)
+            + int(stash_withdrawn) - int(stash_deposited))
 
 
 def total_reserved_savings(db: Session, user_id: int) -> int:
@@ -575,6 +609,20 @@ def savings_goal_balance(db: Session, goal_id: int, user_id: int) -> int:
     return sum(int(amount) * (1 if kind == 'deposit' else -1) for kind, amount in rows)
 
 
+def total_stash_funds(db: Session, user_id: int) -> int:
+    deposited = db.scalar(select(func.coalesce(func.sum(StashMovement.amount), 0)).where(
+        StashMovement.user_id == user_id, StashMovement.kind == 'deposit')) or 0
+    withdrawn = db.scalar(select(func.coalesce(func.sum(StashMovement.amount), 0)).where(
+        StashMovement.user_id == user_id, StashMovement.kind == 'withdraw')) or 0
+    return int(deposited) - int(withdrawn)
+
+
+def stash_fund_balance(db: Session, fund_id: int, user_id: int) -> int:
+    rows = db.execute(select(StashMovement.kind, StashMovement.amount).where(
+        StashMovement.user_id == user_id, StashMovement.fund_id == fund_id))
+    return sum(int(amount) * (1 if kind == 'deposit' else -1) for kind, amount in rows)
+
+
 def current_balance(db, user_id, opening=None):
     inc = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(Entry.user_id==user_id,Entry.kind=='income')) or 0
     exp = db.scalar(select(func.coalesce(func.sum(Entry.amount),0)).where(Entry.user_id==user_id,Entry.kind=='expense')) or 0
@@ -583,7 +631,7 @@ def current_balance(db, user_id, opening=None):
     if opening is not None:
         opening_sum += int(opening) - default_wallet(db, user_id).opening_balance
     available = int(opening_sum) + int(inc) - int(exp) + debt_cash_delta(db, user_id)
-    return available - total_reserved_savings(db, user_id), int(inc), int(exp)
+    return available - total_reserved_savings(db, user_id) - total_stash_funds(db, user_id), int(inc), int(exp)
 
 
 def ensure_nonnegative(db, user_id):
@@ -761,6 +809,19 @@ class NewSavingsGoal(BaseModel):
 
 
 class NewSavingsMovement(BaseModel):
+    kind: Literal['deposit', 'withdraw']
+    wallet_id: int
+    amount: int
+    occurred_on: date = Field(default_factory=date.today)
+    note: str = Field(default='', max_length=300)
+
+
+class NewStashFund(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    note: str = Field(default='', max_length=300)
+
+
+class NewStashMovement(BaseModel):
     kind: Literal['deposit', 'withdraw']
     wallet_id: int
     amount: int
@@ -1122,6 +1183,20 @@ def security_integrity(request:Request,db:Session=Depends(get_db)):
             .where(SavingsMovement.user_id==u.id)):
         if wuid!=u.id or guid!=u.id:
             checks.append({'kind':'invalid_savings_link','detail':f'Khoản dành riêng #{mid} liên kết ví/mục tiêu không hợp lệ.'})
+    checked_stash = 0
+    for fund in db.scalars(select(StashFund).where(StashFund.user_id == u.id)):
+        reserved = stash_fund_balance(db, fund.id, u.id)
+        checked_stash += reserved
+        if reserved < 0:
+            checks.append({'kind':'negative_stash_fund','detail':f'Quỹ tích lũy #{fund.id} có số dư âm.'})
+    if checked_stash != total_stash_funds(db,u.id):
+        checks.append({'kind':'invalid_stash_total','detail':'Số dư quỹ tích lũy không khớp lịch sử.'})
+    for mid, wuid, fuid in db.execute(select(StashMovement.id,Wallet.user_id,StashFund.user_id)
+            .outerjoin(Wallet,Wallet.id==StashMovement.wallet_id)
+            .outerjoin(StashFund,StashFund.id==StashMovement.fund_id)
+            .where(StashMovement.user_id==u.id)):
+        if wuid != u.id or fuid != u.id:
+            checks.append({'kind':'invalid_stash_link','detail':f'Giao dịch tích lũy #{mid} có liên kết sai.'})
     linked=db.execute(select(Entry.id,Entry.wallet_id,Wallet.user_id).outerjoin(Wallet,Entry.wallet_id==Wallet.id).where(Entry.user_id==u.id)).all()
     for eid,wid,wuid in linked:
         if wid is None or wuid!=u.id:
@@ -1517,6 +1592,98 @@ def move_savings(goal_id: int,data: NewSavingsMovement,u: User = Depends(current
     log(db,u.id,'savings_'+data.kind,f'#{goal.id} wallet:{wallet.id} {amount}')
     db.commit()
     return {'ok':True,'movement_id':move.id,'saved_amount':savings_goal_balance(db,goal.id,u.id)}
+
+
+def stash_fund_for(db: Session, user_id: int, fund_id: int, lock: bool = False) -> StashFund:
+    stmt = select(StashFund).where(StashFund.id == fund_id, StashFund.user_id == user_id)
+    if lock:
+        stmt = stmt.with_for_update()
+    fund = db.scalar(stmt)
+    if not fund:
+        raise HTTPException(404, 'Quỹ tích để dành không tồn tại.')
+    return fund
+
+
+def stash_fund_json(db: Session, fund: StashFund) -> dict:
+    return {'id':fund.id, 'name':fund.name, 'note':fund.note,
+            'saved_amount':stash_fund_balance(db,fund.id,fund.user_id),
+            'created_at':fund.created_at.isoformat()}
+
+
+@app.get('/api/stashes')
+def list_stashes(u: User = Depends(current), db: Session = Depends(get_db)):
+    funds = list(db.scalars(select(StashFund).where(StashFund.user_id == u.id).order_by(StashFund.id.desc())))
+    wallets = {w.id:w.name for w in db.scalars(select(Wallet).where(Wallet.user_id == u.id))}
+    history = list(db.scalars(select(StashMovement).where(StashMovement.user_id == u.id)
+                              .order_by(StashMovement.occurred_on.desc(), StashMovement.id.desc()).limit(100)))
+    names = {f.id:f.name for f in funds}
+    items = [stash_fund_json(db,f) for f in funds]
+    return {'items':items, 'total_saved':sum(f['saved_amount'] for f in items),
+            'history':[{'id':m.id,'fund_id':m.fund_id,'fund':names.get(m.fund_id,''),
+                        'wallet_id':m.wallet_id,'wallet':wallets.get(m.wallet_id,''),
+                        'kind':m.kind,'amount':m.amount,'occurred_on':m.occurred_on.isoformat(),
+                        'note':m.note} for m in history]}
+
+
+@app.post('/api/stashes')
+def create_stash(data: NewStashFund, u: User = Depends(current), db: Session = Depends(get_db)):
+    account_locked(db,u.id)
+    name=data.name.strip()
+    if not name:
+        raise HTTPException(422,'Tên quỹ không được để trống.')
+    if (db.scalar(select(func.count(StashFund.id)).where(StashFund.user_id==u.id)) or 0)>=50:
+        raise HTTPException(409,'Mỗi tài khoản tối đa 50 quỹ tích để dành.')
+    fund=StashFund(user_id=u.id,name=name,note=data.note.strip())
+    db.add(fund);db.flush();log(db,u.id,'stash_created',f'#{fund.id}: {name}');db.commit()
+    return stash_fund_json(db,fund)
+
+
+@app.put('/api/stashes/{fund_id}')
+def update_stash(fund_id:int,data:NewStashFund,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    fund=stash_fund_for(db,u.id,fund_id,True)
+    name=data.name.strip()
+    if not name:
+        raise HTTPException(422,'Tên quỹ không được để trống.')
+    fund.name=name;fund.note=data.note.strip()
+    log(db,u.id,'stash_updated',f'#{fund.id}');db.commit()
+    return stash_fund_json(db,fund)
+
+
+@app.delete('/api/stashes/{fund_id}')
+def delete_stash(fund_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    fund=stash_fund_for(db,u.id,fund_id,True)
+    if stash_fund_balance(db,fund.id,u.id) != 0:
+        raise HTTPException(409,'Phải rút hết tiền trước khi xóa quỹ.')
+    if db.scalar(select(func.count(StashMovement.id)).where(StashMovement.fund_id==fund.id)):
+        raise HTTPException(409,'Quỹ đã có lịch sử góp/rút. Để bảo toàn sổ giao dịch, chỉ được đổi tên.')
+    db.delete(fund);log(db,u.id,'stash_deleted',f'#{fund_id}');db.commit()
+    return {'ok':True}
+
+
+@app.post('/api/stashes/{fund_id}/movements')
+def move_stash(fund_id:int,data:NewStashMovement,u:User=Depends(current),db:Session=Depends(get_db)):
+    amount=check_amount(data.amount)
+    if data.occurred_on > date.today() + timedelta(days=366):
+        raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
+    # Serialize every wallet mutation for this user; keeps balance checks atomic on PostgreSQL.
+    account_locked(db,u.id)
+    fund=stash_fund_for(db,u.id,fund_id,True)
+    wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
+    saved=stash_fund_balance(db,fund.id,u.id)
+    if data.kind=='deposit':
+        if wallet_balance(db,wallet)<amount:
+            raise HTTPException(409,'Ví không đủ số dư khả dụng để tích lũy.')
+    elif amount>saved:
+        raise HTTPException(409,'Không thể rút nhiều hơn số tiền đang để dành.')
+    movement=StashMovement(user_id=u.id,fund_id=fund.id,wallet_id=wallet.id,kind=data.kind,
+                            amount=amount,occurred_on=data.occurred_on,note=data.note.strip())
+    db.add(movement);db.flush();ensure_nonnegative(db,u.id)
+    log(db,u.id,'stash_'+data.kind,f'#{fund.id} wallet:{wallet.id} {amount}')
+    db.commit()
+    return {'ok':True,'movement_id':movement.id,'saved_amount':stash_fund_balance(db,fund.id,u.id)}
+
 
 @app.get('/api/wallets')
 def list_wallets(u:User=Depends(current),db:Session=Depends(get_db)):
@@ -1970,11 +2137,13 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     ids=[e.id for e in recent]
     allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
     savings_reserved=total_reserved_savings(db,u.id)
-    return {'savings_reserved':savings_reserved,'total_assets':balance+savings_reserved,'balance':balance,'opening_balance':default_wallet(db,u.id).opening_balance,'total_opening_balance':sum(w.opening_balance for w in wallets),'wallet_count':len(wallets),'wallets':[wallet_json(db,w) for w in wallets],'total_income':all_income,'total_expense':all_expense,
+    stash_reserved=total_stash_funds(db,u.id)
+    reserved_total=savings_reserved+stash_reserved
+    return {'savings_reserved':savings_reserved,'stash_reserved':stash_reserved,'reserved_total':reserved_total,'total_assets':balance+reserved_total,'balance':balance,'opening_balance':default_wallet(db,u.id).opening_balance,'total_opening_balance':sum(w.opening_balance for w in wallets),'wallet_count':len(wallets),'wallets':[wallet_json(db,w) for w in wallets],'total_income':all_income,'total_expense':all_expense,
             'month_income':inc,'month_expense':exp,'month_count':len(month_entries),'net':inc-exp,
             'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in recent],
             'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
-            'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance+savings_reserved-debt_remaining+receivable_remaining}
+            'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance+reserved_total-debt_remaining+receivable_remaining}
 
 
 # v1.0.18 – Read-only scenario forecast based ONLY on registered recurring rules.
@@ -2244,6 +2413,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
     db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
+    db.query(StashMovement).filter(StashMovement.user_id==target.id).delete(synchronize_session=False)
+    db.query(StashFund).filter(StashFund.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsMovement).filter(SavingsMovement.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsGoal).filter(SavingsGoal.user_id==target.id).delete(synchronize_session=False)
     db.query(Wallet).filter(Wallet.user_id==target.id).delete(synchronize_session=False)

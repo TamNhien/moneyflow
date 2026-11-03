@@ -875,3 +875,79 @@ def test_forecast_clamped_months_and_no_duplicate_periods(client):
     assert dates==[date(2026,2,28),date(2026,3,31),date(2026,4,30)]
     rule.next_index=2
     assert list(forecast_due_dates(rule,date(2026,2,1),date(2026,4,30)))==dates[1:]
+
+
+def test_stash_funds_lifecycle_and_balance_integrity(client):
+    """General-purpose saved money is distinct from target-bound savings."""
+    r=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert r.status_code==200,r.text
+    csrf=r.json()['csrf_token']
+    # A fresh wallet keeps this test independent of the rest of the ledger.
+    wallet_resp=auth_post(client,'/api/wallets',{'name':'Ví để dành kiểm thử','kind':'cash','opening_balance':500000},csrf=csrf)
+    assert wallet_resp.status_code==200,wallet_resp.text
+    wid=wallet_resp.json()['id']
+    first=client.get('/api/dashboard?month=2026-11').json()
+    funds=client.get('/api/stashes').json()
+    assert funds['total_saved']>=0
+    create=auth_post(client,'/api/stashes',{'name':'Tiền tích để dành','note':'Để dành linh hoạt'},csrf=csrf)
+    assert create.status_code==200,create.text
+    fid=create.json()['id']
+    assert create.json()['saved_amount']==0
+    assert auth_post(client,'/api/stashes',{'name':'  ', 'note':''},csrf=csrf).status_code==422
+    payload={'kind':'deposit','wallet_id':wid,'amount':150000,'occurred_on':'2026-11-03','note':'Tích lũy tháng 11'}
+    r=auth_post(client,f'/api/stashes/{fid}/movements',payload,csrf=csrf)
+    assert r.status_code==200,r.text
+    assert r.json()['saved_amount']==150000
+    after=client.get('/api/dashboard?month=2026-11').json()
+    assert after['balance']==first['balance']-150000
+    assert after['total_assets']==first['total_assets']
+    assert after['net_worth']==first['net_worth']
+    assert after['stash_reserved']==first.get('stash_reserved',0)+150000
+    assert client.get('/api/wallets').json()['total_balance']==after['balance']
+    assert auth_post(client,f'/api/stashes/{fid}/movements',{**payload,'amount':400000},csrf=csrf).status_code==409
+    assert auth_post(client,f'/api/stashes/{fid}/movements',{**payload,'kind':'withdraw','amount':150001},csrf=csrf).status_code==409
+    # Funds cannot disappear while they hold money or a historical ledger.
+    assert auth_post(client,f'/api/stashes/{fid}',csrf=csrf,method='delete').status_code==409
+    r=auth_post(client,f'/api/stashes/{fid}/movements',{**payload,'kind':'withdraw','amount':50000},csrf=csrf)
+    assert r.status_code==200,r.text
+    assert r.json()['saved_amount']==100000
+    assert auth_post(client,f'/api/stashes/{fid}',{'name':'Quỹ khẩn cấp','note':'Không có hạn mức'},csrf=csrf,method='put').status_code==200
+    report=client.get('/api/reports?end=2026-11&months=3')
+    assert report.status_code==200,report.text
+    assert report.json()['snapshot']['stash_balance']>=100000
+    assert report.json()['snapshot']['total_assets']==after['total_assets']
+    from io import BytesIO
+    from openpyxl import load_workbook
+    excel=client.get('/api/reports.xlsx?end=2026-11&months=3')
+    assert excel.status_code==200 and excel.content.startswith(b'PK')
+    book=load_workbook(BytesIO(excel.content), read_only=True, data_only=True)
+    assert any(row[0]=='Trong đó: Tiền tích để dành' and row[1]>=100000 for row in book['Tổng quan'].values)
+    pdf=client.get('/api/reports.pdf?end=2026-11&months=3')
+    assert pdf.status_code==200 and pdf.content.startswith(b'%PDF-')
+    assert client.get('/api/security/integrity').json()['ok'] is True
+    r=auth_post(client,f'/api/stashes/{fid}/movements',{**payload,'kind':'withdraw','amount':100000},csrf=csrf)
+    assert r.status_code==200,r.text
+    assert client.get('/api/dashboard?month=2026-11').json()['balance']==first['balance']
+    assert auth_post(client,f'/api/stashes/{fid}',csrf=csrf,method='delete').status_code==409
+    history=client.get('/api/stashes').json()['history']
+    assert [h['kind'] for h in history[:3]]==['withdraw','withdraw','deposit']
+
+
+def test_stashes_user_isolation(client):
+    owner=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert owner.status_code==200,owner.text
+    csrf=owner.json()['csrf_token']
+    stash=auth_post(client,'/api/stashes',{'name':'Quỹ riêng tư','note':''},csrf=csrf)
+    assert stash.status_code==200,stash.text
+    fid=stash.json()['id']
+    account=auth_post(client,'/api/users',credentials('stash_member_19'),csrf=csrf)
+    assert account.status_code==200,account.text
+    from fastapi.testclient import TestClient
+    with TestClient(app) as member:
+        login=auth_post(member,'/api/login',{'username':'stash_member_19','password':'SecurePassword@12345'})
+        assert login.status_code==200,login.text
+        member_csrf=login.json()['csrf_token']
+        assert member.get('/api/stashes').json()['items']==[]
+        assert auth_post(member,f'/api/stashes/{fid}',{'name':'Đổi tên quỹ lạ','note':''},csrf=member_csrf,method='put').status_code==404
+        assert auth_post(member,f'/api/stashes/{fid}/movements',{'kind':'deposit','wallet_id':1,'amount':100,'occurred_on':'2026-11-03'},csrf=member_csrf).status_code in (404,422)
+        assert auth_post(member,f'/api/stashes/{fid}',csrf=member_csrf,method='delete').status_code==404

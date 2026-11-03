@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.18
+# MoneyFlow Local v1.0.19
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành linh hoạt**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -160,7 +160,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.17
+.\scripts\publish.ps1 -Version 1.0.19
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -173,7 +173,7 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.17
+.\scripts\publish.ps1 -Version 1.0.19
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
@@ -258,7 +258,11 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | **v1.0.15** | **Báo cáo theo 3/6/12/24 tháng, so sánh thu chi, tính dòng tiền có xét trả/thu hồi nợ và loại trừ chuyển ví nội bộ; tổng tài sản ròng hiện tại; xuất Excel 6 sheet và PDF tiếng Việt; kiểm thử API và frontend cho báo cáo.** |
 | **v1.0.16** | **Phân biệt trực quan nút Excel/PDF, xác nhận MIME/chữ ký tệp; TOTP Authenticator có QR, mã dự phòng một lần, mã hóa bí mật trong DB, khóa sau nhiều lần nhập sai, quản lý phiên, kiểm tra nhất quán dữ liệu và migration không mất tài khoản cũ.** |
 | **v1.0.17** | **Mục tiêu tiết kiệm: góp/rút từ các ví, quỹ dành riêng không tính thu chi, tiến độ và hạn dự kiến, quản lý nhiều mục tiêu, phân quyền, kiểm tra sổ tiền, báo cáo tài sản ròng tính cả tiền tiết kiệm.** |
-
 | **v1.0.18** | **Dự báo dòng tiền 30/60/90 ngày từ lịch định kỳ, phân bổ trả nợ gốc theo thu nhập, phát hiện nguy cơ âm từng ví và cảnh báo kỳ quá hạn, API chỉ đọc không thay số dư.** |
+| **v1.0.19** | **Tiền tích để dành (quỹ tích lũy linh hoạt): tạo nhiều quỹ không bắt buộc mục tiêu/hạn mức, góp từ ví hoặc rút về ví, sổ góp/rút bất biến, kiểm tra số dư từng ví và phân quyền. Số dư khả dụng trừ khoản để dành, tài sản ròng cộng lại khoản này; báo cáo Excel/PDF tách riêng tích lũy và mục tiêu tiết kiệm.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.
+
+## Tiền tích để dành (v1.0.19)
+
+Mở **Tiền tích để dành** trên menu. Tạo quỹ linh hoạt (ví dụ Tiền tích để dành, Quỹ khẩn cấp, Tiền dự phòng); dùng **Góp tiền** hoặc **Rút về ví**. Các khoản này chỉ là điều chuyển nội bộ trên sổ MoneyFlow, không chuyển tiền ngân hàng thật, không phát sinh thu/chi và không có lãi mặc định. Tiền trong các quỹ cộng với tiền tại mục tiêu tiết kiệm đều được tính trong tổng tài sản; số dư khả dụng ví đã loại trừ khoản được giữ riêng. Quỹ đã có lịch sử không thể xóa để duy trì khả năng đối soát. Bảng mới `stash_funds` và `stash_movements` được tạo qua metadata khi ứng dụng khởi động; không cần xóa dữ liệu cũ.

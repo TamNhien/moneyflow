@@ -388,7 +388,7 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .saving-track{height:12px;border-radius:30px;background:#303c5c;overflow:hidden}.saving-track span{display:block;height:100%;border-radius:30px;background:linear-gradient(90deg,#766af9,#39d4b5)}
 .saving-meta{display:flex;justify-content:space-between;gap:10px;margin:9px 0;color:#a6b6d5;font-size:11px;flex-wrap:wrap}
 .saving-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}.saving-actions .btn{padding:9px 11px;font-size:12px}.saving-history{margin-top:20px}
-.report-kpis-five{grid-template-columns:repeat(5,minmax(0,1fr))}
+.report-kpis-five{grid-template-columns:repeat(3,minmax(0,1fr))}
 @media(max-width:1150px){.saving-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.report-kpis-five{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){.saving-grid{grid-template-columns:1fr}.report-kpis-five{grid-template-columns:repeat(2,minmax(0,1fr))}.saving-card{padding:19px}}
 @media(max-width:430px){.report-kpis-five{grid-template-columns:1fr}}
