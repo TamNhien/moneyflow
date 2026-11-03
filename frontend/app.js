@@ -25,7 +25,7 @@ const today = () => {const d=new Date();return `${d.getFullYear()}-${String(d.ge
 const thisMonth = () => today().slice(0,7);
 const monthText = m => {const [y,mo]=m.split('-');return `Tháng ${+mo}/${y}`};
 const pct=(a,b)=>b>0?Math.round(a/b*100):0;
-const state={user:null,csrf:null,needsSetup:false,authMode:'login',resetToken:null,page:'dashboard',month:thisMonth(),categories:[],transPage:1,transKind:'',transCategory:'',transSearch:'',transWallet:'',wallets:[],data:null,reminders:[],recurringData:null,reportMonths:12};
+const state={user:null,csrf:null,loginTicket:null,needsSetup:false,authMode:'login',resetToken:null,page:'dashboard',month:thisMonth(),categories:[],transPage:1,transKind:'',transCategory:'',transSearch:'',transWallet:'',wallets:[],data:null,reminders:[],recurringData:null,reportMonths:12};
 const PAGE_NAMES={reports:'Báo cáo tài chính',recurring:'Định kỳ & nhắc lịch',wallets:'Ví & tài khoản',dashboard:'Tổng quan',transactions:'Giao dịch',budgets:'Ngân sách',debts:'Quản lý nợ',categories:'Danh mục',settings:'Cài đặt',users:'Người dùng',audit:'Nhật ký hệ thống'};
 
 async function api(path, options={}) {
@@ -76,16 +76,16 @@ function showAuth(mode=null){
   $('#shell').hidden=true;$('#auth-screen').hidden=false;$('#modal-root').innerHTML='';
   if(mode)state.authMode=mode;
   else if(state.authMode!=='reset')state.authMode=state.needsSetup?'setup':'login';
-  const modeNow=state.authMode,setup=modeNow==='setup',forgot=modeNow==='forgot',reset=modeNow==='reset';
-  $('#auth-title').textContent=setup?'Tạo tài khoản quản trị':forgot?'Lấy lại mật khẩu':reset?'Đặt lại mật khẩu':'Đăng nhập tài khoản';
-  $('#auth-subtitle').textContent=setup?'Tạo tài khoản quản trị với thông tin liên hệ đầy đủ.':forgot?'Khôi phục quyền truy cập bằng email đã đăng ký.':reset?'Chọn mật khẩu mạnh để bảo vệ dữ liệu tài chính.':'Đăng nhập để tiếp tục quản lý tài chính.';
-  $('#auth-form').hidden=forgot||reset;$('#forgot-form').hidden=!forgot;$('#reset-form').hidden=!reset;
+  const modeNow=state.authMode,setup=modeNow==='setup',forgot=modeNow==='forgot',reset=modeNow==='reset',otp=modeNow==='otp';
+  $('#auth-title').textContent=otp?'Xác thực hai bước':setup?'Tạo tài khoản quản trị':forgot?'Lấy lại mật khẩu':reset?'Đặt lại mật khẩu':'Đăng nhập tài khoản';
+  $('#auth-subtitle').textContent=otp?'Nhập mã 6 số trên ứng dụng xác thực hoặc mã dự phòng.':setup?'Tạo tài khoản quản trị với thông tin liên hệ đầy đủ.':forgot?'Khôi phục quyền truy cập bằng email đã đăng ký.':reset?'Chọn mật khẩu mạnh để bảo vệ dữ liệu tài chính.':'Đăng nhập để tiếp tục quản lý tài chính.';
+  $('#auth-form').hidden=forgot||reset||otp;$('#forgot-form').hidden=!forgot;$('#reset-form').hidden=!reset;$('#otp-form').hidden=!otp;
   $$('.signup-only').forEach(el=>el.hidden=!setup);
   $$('.signup-only input').forEach(el=>{el.required=setup;el.disabled=!setup;if(!setup)el.setCustomValidity('');});
   $('#auth-form [name="password"]').autocomplete=setup?'new-password':'current-password';
   $('#auth-submit').innerHTML=setup?'Tạo tài khoản <span>→</span>':'Đăng nhập <span>→</span>';
-  $('#auth-links').hidden=setup;$('#forgot-link').hidden=modeNow!=='login';$('#back-login-link').hidden=modeNow==='login';
-  for(const key of ['auth','forgot','reset']) {const x=$(`#${key}-error`);if(x)x.textContent='';}
+  $('#auth-links').hidden=setup||otp;$('#forgot-link').hidden=modeNow!=='login';$('#back-login-link').hidden=modeNow==='login';
+  for(const key of ['auth','forgot','reset','otp']) {const x=$(`#${key}-error`);if(x)x.textContent='';}
   $$('[data-password-strength]').forEach(updateStrength);
   updatePasswordConfirmation('auth');updatePasswordConfirmation('reset');
   if(forgot){api('recovery-config').then(config=>{if(state.authMode==='forgot'&&!config.email_configured)$('#forgot-notice').textContent='Hệ thống chưa cấu hình SMTP. Cần thiết lập email gửi trong file .env theo README trước khi sử dụng chức năng này.'}).catch(()=>{});}
@@ -207,7 +207,7 @@ async function renderReports(){
  const cats=d.categories.map(c=>`<div class="report-category-item"><span class="legend-dot" style="background:${/^#[0-9a-fA-F]{6}$/.test(c.color)?c.color:'#7769ee'}"></span><b>${esc(c.name)}</b><strong>${fmoney(c.amount)}</strong></div>`).join('');
  const table=d.monthly.map(r=>`<tr><td>${esc(monthText(r.month))}</td><td class="amount income">${fmoney(r.income)}</td><td class="amount expense">${fmoney(r.expense)}</td><td>${fmoney(r.debt_paid)}</td><td>${fmoney(r.debt_collected)}</td><td class="amount">${signedMoney(r.net_cash)}</td></tr>`).join('');
  $('#page-content').innerHTML=heading('Báo cáo & phân tích tài chính',`Thống kê từ ${d.from_month} đến ${d.to_month}. Số dư và tài sản ròng là số liệu hiện tại.`,
- `<button class="btn btn-secondary" data-action="report-excel">↧ Xuất Excel</button><button class="btn btn-primary" data-action="report-pdf">↧ Xuất PDF</button>`)+
+ `<button type="button" class="btn export-btn export-excel" data-action="report-excel" title="Tải báo cáo Excel" aria-label="Tải báo cáo Excel định dạng XLSX"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 3h8l5 5v13H8z"/><path d="M16 3v5h5"/><path d="m2 10 6 8m0-8-6 8"/></svg>Xuất Excel <small>.XLSX</small></button><button type="button" class="btn export-btn export-pdf" data-action="report-pdf" title="Tải báo cáo PDF" aria-label="Tải báo cáo PDF định dạng PDF"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h4"/><path d="M8 17h8M8 13h5"/></svg>Xuất PDF <small>.PDF</small></button>`)+
  `<div class="report-controls"><label>Khoảng xem <select id="report-months" class="select" aria-label="Chọn số tháng">${options}</select></label><div class="report-help">Chọn tháng kết thúc ở góc phải trên. Chuyển tiền giữa ví không tính là thu/chi.</div></div>`+
  `<div class="report-kpis">${card('Tổng thu nhập',t.income)}${card('Tổng chi tiêu',t.expense)}${card('Đã trả nợ (gốc + lãi)',t.debt_paid)}${card('Đã thu hồi nợ',t.debt_collected)}${card('Dòng tiền thuần',t.net_cash,'Đã tính các khoản trả/thu hồi nợ')}</div>`+
  `<section class="panel report-snapshot"><div class="panel-head"><div><h2>Tình hình tài chính hiện tại</h2><p class="panel-sub">Tổng hợp số dư ví và nợ, không phải số dư lịch sử cuối tháng.</p></div></div><div class="report-kpis report-kpis-four">${card('Tổng số dư các ví',s.cash_balance)}${card('Nợ phải thu',s.receivable)}${card('Nợ phải trả',s.payable)}${card('Tài sản ròng',s.net_worth)}</div></section>`+
@@ -221,7 +221,13 @@ async function downloadReport(ext){
  const q=`end=${encodeURIComponent(state.month)}&months=${state.reportMonths}`;
  const r=await fetch(`/api/reports.${ext}?${q}`,{credentials:'same-origin'});
  if(!r.ok){let message='Không thể xuất báo cáo.';try{const error=await r.json();if(typeof error.detail==='string')message=error.detail}catch{}throw Error(message)}
- const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+ const blob=await r.blob();
+ const mime=r.headers.get('content-type')||'';
+ const header=new Uint8Array(await blob.slice(0,4).arrayBuffer());
+ const pdf=ext==='pdf',magicOk=pdf?(header[0]===37&&header[1]===80&&header[2]===68&&header[3]===70):(header[0]===80&&header[1]===75);
+ if(!magicOk || !mime.includes(pdf?'application/pdf':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))
+   throw Error('Máy chủ trả về sai định dạng. Chưa lưu file báo cáo.');
+ const url=URL.createObjectURL(blob),a=document.createElement('a');
  a.href=url;a.download=`moneyflow-report-${state.month}.${ext}`;document.body.append(a);a.click();a.remove();
  setTimeout(()=>URL.revokeObjectURL(url),1000);toast(`Đã xuất báo cáo ${ext.toUpperCase()}.`);
 }
@@ -248,7 +254,7 @@ async function renderWallets(){
 function walletModal(w=null){openModal(w?'Chỉnh sửa ví':'Tạo ví mới',w?'Giữ nguyên lịch sử và số dư khi đổi tên/loại ví.':'Ví mới có số dư riêng. Số dư ban đầu là tiền bạn đã có sẵn trong ví.',`<input type="hidden" name="id" value="${w?.id||''}"/><label>Tên ví<input class="input" name="name" maxlength="80" required placeholder="Ví dụ: Tiền mặt, VCB, MoMo" value="${esc(w?.name||'')}"/></label><label>Loại ví<select class="select" name="kind"><option value="cash" ${w?.kind==='cash'?'selected':''}>◉ Tiền mặt</option><option value="bank" ${w?.kind==='bank'?'selected':''}>▤ Ngân hàng</option><option value="ewallet" ${w?.kind==='ewallet'?'selected':''}>◈ Ví điện tử</option></select></label>${w?'':`<label>Số dư ban đầu (VNĐ)<input class="input" name="opening_balance" type="number" min="0" max="1000000000000" step="1" value="0" required/></label><div class="simple-info">Nếu chuyển tiền từ ví có sẵn, hãy đặt số dư ban đầu = 0, rồi dùng chức năng Chuyển tiền để tránh tính trùng.</div>`}`,'wallet',w?'Lưu thông tin':'Tạo ví');}
 function walletTransferModal(){const active=state.wallets.filter(w=>w.active);if(active.length<2)return toast('Cần ít nhất 2 ví đang hoạt động.',true);const opts=active.map(w=>`<option value="${w.id}">${esc(w.name)} · ${fmoney(w.balance)}</option>`).join('');openModal('Chuyển tiền giữa các ví','Số tiền được trừ khỏi ví nguồn và cộng vào ví đích; tổng tài sản không đổi.',`<label>Ví nguồn<select class="select" name="from_wallet_id" required>${opts}</select></label><label>Ví nhận<select class="select" name="to_wallet_id" required>${active.slice().reverse().map(w=>`<option value="${w.id}">${esc(w.name)} · ${fmoney(w.balance)}</option>`).join('')}</select></label><div class="row-fields"><label>Số tiền (VNĐ)<input class="input" type="number" name="amount" min="1" max="1000000000000" step="1" required/></label><label>Ngày chuyển<input class="input" name="occurred_on" type="date" value="${today()}" required/></label></div><label>Ghi chú<textarea class="textarea" name="note" maxlength="300" placeholder="Ví dụ: Chuyển tiền vào ngân hàng"></textarea></label>`,'wallet-transfer','Xác nhận chuyển');}
 
-async function renderSettings(){const d=await api(`dashboard?month=${state.month}`);$('#page-content').innerHTML=heading('Cài đặt tài khoản','Quản lý số dư ban đầu, mật khẩu và các thông tin tài khoản.')+`<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>◈ Số tiền ban đầu</h2></div><p class="panel-sub" style="margin-bottom:20px">Số tiền bạn có khi bắt đầu sử dụng MoneyFlow. Số dư thực tế được cộng trừ tự động từ các giao dịch.</p><form data-form="opening"><div class="form-group"><label>Số tiền gốc (VNĐ)</label><input class="input" name="opening_balance" inputmode="numeric" type="number" min="0" max="1000000000000" step="1" value="${d.opening_balance}" required/><small>Số dư hiện tại: ${fmoney(d.balance)}</small></div><button type="submit" class="btn btn-primary">Lưu số tiền ban đầu</button></form></section><section class="panel"><div class="panel-head"><h2>♙ Thông tin tài khoản</h2></div><div class="simple-info"><strong>Tên đăng nhập:</strong> ${esc(state.user.username)}<br><strong>Email:</strong> ${esc(state.user.email||'Chưa cập nhật')}<br><strong>Số điện thoại:</strong> ${esc(vietnamPhone(state.user.phone)||'Chưa cập nhật')}<br><strong>Địa chỉ:</strong> ${esc(state.user.address||'Chưa cập nhật')}<br><strong>Vai trò:</strong> ${state.user.role==='admin'?'Quản trị viên':'Thành viên'}<br><strong>Lưu trữ:</strong> PostgreSQL chạy local</div><p class="panel-sub" style="margin:19px 0">Không chia sẻ tài khoản. Hãy đặt mật khẩu mạnh và sao lưu dữ liệu định kỳ.</p><button class="btn btn-secondary" data-action="edit-profile">✎ Cập nhật hồ sơ</button><button class="btn btn-secondary" data-action="change-password" style="margin-left:8px">🔒 Đổi mật khẩu</button><button class="btn btn-danger" data-action="logout" style="margin-left:8px">Đăng xuất</button></section></div><div class="panel" style="margin-top:18px"><div class="panel-head"><h2>🔐 An toàn dữ liệu</h2></div><div class="simple-info">Mật khẩu được băm bằng Argon2id (salt riêng cho từng mật khẩu). Phiên đăng nhập dùng cookie HttpOnly và mã chống CSRF. Ứng dụng chỉ mở tại 127.0.0.1 trên máy bạn. Dữ liệu được lưu trong Docker volume; muốn sao lưu hãy chạy <strong>scripts/backup.ps1</strong> trên Windows. Khi xóa Docker volume, dữ liệu sẽ mất nếu không có bản sao lưu.</div></div>`;}
+async function renderSettings(){const d=await api(`dashboard?month=${state.month}`);$('#page-content').innerHTML=heading('Cài đặt tài khoản','Quản lý số dư ban đầu, mật khẩu và các thông tin tài khoản.')+`<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>◈ Số tiền ban đầu</h2></div><p class="panel-sub" style="margin-bottom:20px">Số tiền bạn có khi bắt đầu sử dụng MoneyFlow. Số dư thực tế được cộng trừ tự động từ các giao dịch.</p><form data-form="opening"><div class="form-group"><label>Số tiền gốc (VNĐ)</label><input class="input" name="opening_balance" inputmode="numeric" type="number" min="0" max="1000000000000" step="1" value="${d.opening_balance}" required/><small>Số dư hiện tại: ${fmoney(d.balance)}</small></div><button type="submit" class="btn btn-primary">Lưu số tiền ban đầu</button></form></section><section class="panel"><div class="panel-head"><h2>♙ Thông tin tài khoản</h2></div><div class="simple-info"><strong>Tên đăng nhập:</strong> ${esc(state.user.username)}<br><strong>Email:</strong> ${esc(state.user.email||'Chưa cập nhật')}<br><strong>Số điện thoại:</strong> ${esc(vietnamPhone(state.user.phone)||'Chưa cập nhật')}<br><strong>Địa chỉ:</strong> ${esc(state.user.address||'Chưa cập nhật')}<br><strong>Vai trò:</strong> ${state.user.role==='admin'?'Quản trị viên':'Thành viên'}<br><strong>Lưu trữ:</strong> PostgreSQL chạy local</div><p class="panel-sub" style="margin:19px 0">Không chia sẻ tài khoản. Hãy đặt mật khẩu mạnh và sao lưu dữ liệu định kỳ.</p><button class="btn btn-secondary" data-action="edit-profile">✎ Cập nhật hồ sơ</button><button class="btn btn-secondary" data-action="change-password" style="margin-left:8px">🔒 Đổi mật khẩu</button><button class="btn btn-danger" data-action="logout" style="margin-left:8px">Đăng xuất</button></section></div><div class="panel" style="margin-top:18px"><div class="panel-head"><h2>🔐 An toàn dữ liệu</h2></div><div class="simple-info">Mật khẩu được băm bằng Argon2id (salt riêng cho từng mật khẩu). Phiên đăng nhập dùng cookie HttpOnly và mã chống CSRF. Ứng dụng chỉ mở tại 127.0.0.1 trên máy bạn. Dữ liệu được lưu trong Docker volume; muốn sao lưu hãy chạy <strong>scripts/backup.ps1</strong> trên Windows. Khi xóa Docker volume, dữ liệu sẽ mất nếu không có bản sao lưu.</div></div><section class="panel security-panel"><div class="panel-head"><div><h2>🛡️ Bảo mật nâng cao</h2><p class="panel-sub">Mã xác thực hai bước, quản lý phiên đăng nhập và kiểm tra dữ liệu.</p></div></div><div class="security-actions"><span class="security-pill">${state.user.totp_enabled?'● 2FA đang bật':'○ 2FA chưa bật'}</span><button type="button" class="btn btn-secondary" data-action="totp-setup" ${state.user.totp_enabled?'hidden':''}>Bật xác thực 2 bước</button><button type="button" class="btn btn-secondary" data-action="totp-disable" ${state.user.totp_enabled?'':'hidden'}>Tắt xác thực 2 bước</button><button type="button" class="btn btn-secondary" data-action="security-sessions">Phiên đăng nhập</button><button type="button" class="btn btn-secondary" data-action="security-integrity">Kiểm tra số dư</button></div><p class="panel-sub">Sử dụng Google Authenticator, Microsoft Authenticator hoặc ứng dụng TOTP tương thích. Mã dự phòng chỉ hiển thị một lần khi bật.</p></section>`;}
 async function renderDebts(){
  const d=await api('debts');state.debtData=d;
  const typeLabel=x=>x.direction==='receivable'?'Phải thu':'Phải trả';
@@ -327,6 +333,15 @@ async function submitForm(form){const type=form.dataset.form, raw=formObj(form);
  else if(type==='wallet'){const payload={name:raw.name.trim(),kind:raw.kind};if(!raw.id)payload.opening_balance=n(raw.opening_balance);await api(raw.id?`wallets/${raw.id}`:'wallets',{method:raw.id?'PUT':'POST',body:JSON.stringify(payload)});toast(raw.id?'Đã cập nhật ví!':'Đã tạo ví mới!');}
  else if(type==='wallet-transfer'){await api('wallet-transfers',{method:'POST',body:JSON.stringify({from_wallet_id:n(raw.from_wallet_id),to_wallet_id:n(raw.to_wallet_id),amount:n(raw.amount),occurred_on:raw.occurred_on,note:raw.note||''})});toast('Đã chuyển tiền; tổng số dư không đổi!');}
  else if(type==='recurring'){const payload={title:raw.title.trim(),amount:n(raw.amount),category_id:n(raw.category_id),wallet_id:n(raw.wallet_id),note:raw.note||'',mode:raw.mode,remind_days:n(raw.remind_days)};if(!raw.id)Object.assign(payload,{kind:raw.kind,frequency:raw.frequency,start_on:raw.start_on});await api(raw.id?`recurring/${raw.id}`:'recurring',{method:raw.id?'PUT':'POST',body:JSON.stringify(payload)});toast(raw.id?'Đã lưu lịch định kỳ.':'Đã tạo lịch định kỳ.');}
+ else if(type==='totp-begin'){await showTotpQr(raw.password);return;}
+ else if(type==='totp-enable'){
+   const result=await api('security/totp/enable',{method:'POST',body:JSON.stringify({code:raw.code.trim()})});
+   state.user.totp_enabled=true;toast('Đã bật xác thực hai bước.');showRecoveryCodes(result.recovery_codes);return;
+ }
+ else if(type==='totp-disable'){
+   await api('security/totp/disable',{method:'POST',body:JSON.stringify({password:raw.password,code:raw.code.trim()})});
+   state.user.totp_enabled=false;toast('Đã tắt xác thực hai bước.');
+ }
  else if(type==='category'){await api('categories',{method:'POST',body:JSON.stringify(raw)});toast('Đã tạo danh mục mới!');}
  else if(type==='debt'){const old=state.debtData?.items?.find(x=>String(x.id)===raw.id);const payload={name:raw.name.trim(),lender:raw.lender||'',direction:raw.direction||old?.direction||'payable',principal:n(raw.principal),interest_rate_pct:n(raw.interest_rate_pct),installment_count:n(raw.installment_count),due_date:raw.due_date||null,note:raw.note||''};await api(raw.id?`debts/${raw.id}`:'debts',{method:raw.id?'PUT':'POST',body:JSON.stringify(payload)});toast(raw.id?'Đã cập nhật khoản nợ!':'Đã thêm nợ gốc. Tiền thu sau này tự động trừ nợ!');}
  else if(type==='debt-pay'){await api(`debts/${raw.debt_id}/payments`,{method:'POST',body:JSON.stringify({amount:n(raw.amount),interest_amount:n(raw.interest_amount),paid_on:raw.paid_on,wallet_id:n(raw.wallet_id)})});toast('Đã ghi nhận gốc và lãi thực tế, số dư ví đã cập nhật!');}
@@ -339,7 +354,42 @@ async function submitForm(form){const type=form.dataset.form, raw=formObj(form);
  else if(type==='password'){if(!strongPassword(raw.new_password))throw new Error('Mật khẩu mới chưa đủ mạnh.');checkPasswordConfirmation(raw.new_password,raw.confirm_password);await api(raw.user_id?`users/${raw.user_id}/reset-password`:'change-password',{method:'POST',body:JSON.stringify(raw.user_id?{new_password:raw.new_password,confirm_password:raw.confirm_password}:{old_password:raw.old_password,new_password:raw.new_password,confirm_password:raw.confirm_password})});toast('Đã cập nhật mật khẩu!');if(raw.user_id&&Number(raw.user_id)===state.user.id){state.user=null;showAuth();return;}}
  else if(type==='month'){state.month=raw.month;state.transPage=1;}
  closeModal();await navigate(state.page);}
-async function clickAction(el){const action=el.dataset.action,id=Number(el.dataset.id);switch(action){case 'report-excel':await downloadReport('xlsx');break;case 'report-pdf':await downloadReport('pdf');break;case 'opening-modal':openingModal();break;case 'wallet-add':walletModal();break;case 'wallet-edit':walletModal(state.wallets.find(w=>w.id===id));break;case 'wallet-transfer':walletTransferModal();break;case 'wallet-toggle':if(confirm('Thay đổi trạng thái ví? Ví phải có số dư 0 khi khóa.')){await api(`wallets/${id}/toggle`,{method:'POST',body:'{}'});toast('Đã thay đổi trạng thái ví.');await navigate('wallets')}break;case 'wallet-transfer-undo':if(confirm('Hoàn tác lần chuyển tiền này? Ví nhận phải còn đủ số dư.')){await api(`wallet-transfers/${id}`,{method:'DELETE',body:'{}'});toast('Đã hoàn tác chuyển tiền.');await navigate('wallets')}break;case 'close-modal':closeModal();break;case 'add-entry':entryModal();break;case 'add-income':entryModal(null,'income');break;case 'edit-entry':{const found=state.transData?.items?.find(x=>x.id===id);if(found)entryModal(found);break}case 'delete-entry':if(confirm('Xóa giao dịch này? Số dư sẽ được tính lại.')){await api(`transactions/${id}`,{method:'DELETE',body:'{}'});toast('Đã xóa giao dịch!');await navigate(state.page)}break;
+function beginTotp(){
+ openModal('Bật xác thực hai bước','Xác nhận mật khẩu hiện tại trước khi tạo mã QR dùng một lần.',
+ `<label>Mật khẩu hiện tại<input class="input" type="password" name="password" autocomplete="current-password" required/></label>`,
+ 'totp-begin','Tạo mã QR xác thực');
+}
+async function showTotpQr(password){
+ const d=await api('security/totp/setup',{method:'POST',body:JSON.stringify({password})});
+ openModal('Thiết lập Authenticator','Quét QR bằng ứng dụng Authenticator, sau đó nhập mã 6 số. Mã QR hết hạn sau 10 phút.',
+ `<div class="totp-qr"><img src="${d.qr_data_url}" width="175" height="175" alt="Mã QR cấu hình TOTP"/></div><div class="simple-info">Nếu không quét QR được, nhập mã thủ công: <strong class="totp-secret">${esc(d.secret)}</strong></div><label>Mã xác nhận 6 số<input class="input" type="text" inputmode="numeric" name="code" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required placeholder="123456"/></label>`,
+ 'totp-enable','Xác nhận và bật 2FA');
+}
+function showRecoveryCodes(codes){
+ openModal('Lưu mã dự phòng','Hãy lưu 8 mã này vào nơi riêng tư. Chúng chỉ hiển thị một lần; mỗi mã chỉ dùng một lần.',
+ `<div class="recovery-codes" aria-label="Mã khôi phục">${codes.map(code=>`<code>${esc(code)}</code>`).join('')}</div><div class="form-help">Không chụp hoặc gửi mã dự phòng cho người khác. Khi mất điện thoại, dùng một mã dự phòng để đăng nhập.</div>`,
+ 'recovery-done','Tôi đã lưu mã dự phòng');
+}
+async function listSecuritySessions(){
+ const d=await api('security/sessions');
+ const html=d.items.map(x=>`<div class="security-session"><div><b>${esc(x.user_agent)}</b><small>${esc(x.created_at.slice(0,16).replace('T',' '))} · Hết hạn ${esc(x.expires_at.slice(0,10))}</small></div>${x.current?'<span class="security-pill">Phiên hiện tại</span>':`<button type="button" class="btn btn-danger" data-action="security-revoke" data-id="${x.id}">Thu hồi</button>`}</div>`).join('');
+ openModal('Các phiên đăng nhập','Có thể thu hồi những thiết bị không còn dùng. Phiên hiện tại vẫn được giữ.',
+ `${html||'<div class="simple-info">Không có phiên đăng nhập.</div>'}<div class="security-actions"><button type="button" class="btn btn-danger" data-action="security-revoke-others">Đăng xuất tất cả phiên khác</button></div>`,
+ 'sessions-done','Đóng');
+}
+async function showSecurityIntegrity(){
+ const d=await api('security/integrity');
+ openModal('Kiểm tra tính nhất quán','Kiểm tra chỉ đọc, không điều chỉnh số dư hoặc lịch sử giao dịch.',
+ `<div class="simple-info"><strong>${d.ok?'✓ Không phát hiện bất thường':'⚠ Phát hiện bất thường'}</strong><p>Đã kiểm tra ${d.checked_wallets} ví và ${d.checked_entries} giao dịch.</p></div>${d.issues.map(x=>`<p class="security-issue">${esc(x.detail)}</p>`).join('')}`,
+ 'integrity-done','Đóng');
+}
+async function clickAction(el){const action=el.dataset.action,id=Number(el.dataset.id);switch(action){case 'otp-back':state.loginTicket=null;showAuth('login');break;case 'totp-setup':await beginTotp();break;
+case 'totp-disable':openModal('Tắt xác thực hai bước','Nhập mật khẩu hiện tại và mã TOTP hoặc mã dự phòng.',`<label>Mật khẩu hiện tại<input class="input" name="password" type="password" autocomplete="current-password" required/></label><label>Mã xác thực / mã dự phòng<input class="input" name="code" maxlength="32" required autocomplete="one-time-code"/></label>`,'totp-disable','Tắt 2FA');break;
+case 'security-sessions':await listSecuritySessions();break;
+case 'security-integrity':await showSecurityIntegrity();break;
+case 'security-revoke':if(confirm('Thu hồi phiên đăng nhập này?')){await api(`security/sessions/${id}`,{method:'DELETE',body:'{}'});toast('Đã thu hồi phiên.');await listSecuritySessions();}break;
+case 'security-revoke-others':if(confirm('Đăng xuất tất cả phiên khác?')){const d=await api('security/sessions/revoke-others',{method:'POST',body:'{}'});toast(`Đã thu hồi ${d.revoked} phiên.`);await listSecuritySessions();}break;
+case 'report-excel':await downloadReport('xlsx');break;case 'report-pdf':await downloadReport('pdf');break;case 'opening-modal':openingModal();break;case 'wallet-add':walletModal();break;case 'wallet-edit':walletModal(state.wallets.find(w=>w.id===id));break;case 'wallet-transfer':walletTransferModal();break;case 'wallet-toggle':if(confirm('Thay đổi trạng thái ví? Ví phải có số dư 0 khi khóa.')){await api(`wallets/${id}/toggle`,{method:'POST',body:'{}'});toast('Đã thay đổi trạng thái ví.');await navigate('wallets')}break;case 'wallet-transfer-undo':if(confirm('Hoàn tác lần chuyển tiền này? Ví nhận phải còn đủ số dư.')){await api(`wallet-transfers/${id}`,{method:'DELETE',body:'{}'});toast('Đã hoàn tác chuyển tiền.');await navigate('wallets')}break;case 'close-modal':closeModal();break;case 'add-entry':entryModal();break;case 'add-income':entryModal(null,'income');break;case 'edit-entry':{const found=state.transData?.items?.find(x=>x.id===id);if(found)entryModal(found);break}case 'delete-entry':if(confirm('Xóa giao dịch này? Số dư sẽ được tính lại.')){await api(`transactions/${id}`,{method:'DELETE',body:'{}'});toast('Đã xóa giao dịch!');await navigate(state.page)}break;
 case 'export':{const r=await fetch(`/api/export.csv?month=${encodeURIComponent(state.month)}`,{credentials:'same-origin'});if(!r.ok)throw Error('Không thể xuất dữ liệu.');const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`moneyflow-${state.month}.csv`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Đã xuất file CSV.');break}
 case 'search-trans':state.transSearch=$('#search-trans')?.value?.trim()||'';state.transPage=1;await navigate('transactions');break;
 case 'page-prev':state.transPage=Math.max(1,state.transPage-1);await navigate('transactions');break;case 'page-next':state.transPage++;await navigate('transactions');break;
@@ -369,9 +419,17 @@ document.addEventListener('submit',async e=>{
    try{const setup=state.authMode==='setup';if(setup&&!strongPassword(raw.password))throw new Error('Mật khẩu phải có tối thiểu 12 ký tự, chữ hoa, chữ thường, số và ký tự đặc biệt.');if(setup)checkPasswordConfirmation(raw.password,raw.confirm_password);
      const payload={username:raw.username,password:raw.password};if(setup)Object.assign(payload,{email:raw.email,phone:raw.phone,address:raw.address,confirm_password:raw.confirm_password});
      const result=await api(setup?'setup':'login',{method:'POST',body:JSON.stringify(payload)});
+     if(result.two_factor_required){state.loginTicket=result.login_ticket;showAuth('otp');$('#otp-form [name="code"]').focus();return;}
      state.user=result.user;state.csrf=result.csrf_token;state.resetToken=null;showShell();await navigate('dashboard');if(setup)openingModal();if(!state.user.profile_complete)setTimeout(()=>profileModal(),180);
      toast(setup?'Tạo tài khoản thành công!':'Chào mừng quay trở lại!');
    }catch(err){error.textContent=err.message}finally{setBusy(false)}return;
+ }
+ if(e.target.id==='otp-form'){
+   e.preventDefault();$('#otp-error').textContent='';setBusy(true);
+   try{if(!state.loginTicket)throw Error('Yêu cầu xác thực đã hết hạn. Hãy đăng nhập lại.');
+     const result=await api('login-otp',{method:'POST',body:JSON.stringify({login_ticket:state.loginTicket,code:formObj(e.target).code.trim()})});
+     state.loginTicket=null;state.user=result.user;state.csrf=result.csrf_token;showShell();await navigate('dashboard');toast('Đã xác thực hai bước thành công.');}
+   catch(ex){$('#otp-error').textContent=ex.message}finally{setBusy(false)}return;
  }
  if(e.target.id==='forgot-form'){
    e.preventDefault();$('#forgot-error').textContent='';$('#forgot-notice').textContent='';setBusy(true);

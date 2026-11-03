@@ -355,3 +355,22 @@ select option { background: #1d2b47; color: #f3f6ff; }
 @media(max-width:1380px){.report-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.report-dual{grid-template-columns:1fr}}
 @media(max-width:740px){.report-kpis,.report-kpis-four{grid-template-columns:repeat(2,minmax(0,1fr))}.report-card{padding:13px}.report-card>strong{font-size:18px}}
 @media(max-width:450px){.report-kpis,.report-kpis-four,.report-mini-grid{grid-template-columns:1fr}}
+
+/* v1.0.16: accessible report export buttons and security controls */
+.export-btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;font-weight:750;white-space:nowrap}
+.export-btn svg{width:18px;height:18px;flex-shrink:0}
+.export-btn small{font-size:10px;letter-spacing:.04em;opacity:.78}
+.export-excel{background:#125a46;color:#d3fff0;border:1px solid #2f9674}
+.export-excel:hover{background:#167457}
+.export-pdf{background:#6f3c4a;color:#fff0f2;border:1px solid #b45d74}
+.export-pdf:hover{background:#8b4556}
+.security-panel{margin-top:20px}.security-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:15px 0}
+.security-pill{display:inline-flex;border:1px solid #3a527c;background:#202d4c;border-radius:24px;padding:8px 12px;color:#c5d5ff;font-size:12px;font-weight:700}
+.security-session{display:flex;align-items:center;justify-content:space-between;gap:15px;border:1px solid #344466;background:#1a2947;padding:12px;border-radius:11px;margin:8px 0}
+.security-session>div{display:grid;gap:5px;min-width:0;overflow-wrap:anywhere}.security-session small{color:#9badcd;font-size:12px}
+.totp-qr{text-align:center;margin:10px 0}.totp-qr img{background:#fff;padding:10px;border-radius:13px;max-width:100%;height:auto}
+.totp-secret{display:block;letter-spacing:.08em;overflow-wrap:anywhere;margin-top:8px;color:#bcf4e6}
+.recovery-codes{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin:15px 0}
+.recovery-codes code{color:#d5ffef;padding:12px;background:#182a3c;border:1px solid #335e51;border-radius:10px;font-size:15px;text-align:center;letter-spacing:1px}
+.security-issue{padding:10px;border-radius:10px;color:#ffd0cd;background:#502c39}
+@media(max-width:540px){.recovery-codes{grid-template-columns:1fr}.export-btn{padding:12px 14px}}

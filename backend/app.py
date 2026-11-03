@@ -1,5 +1,10 @@
 """MoneyFlow local-first finance application API (single-origin FastAPI)."""
 import csv
+import base64
+import hmac
+import struct
+import time
+from urllib.parse import quote
 import asyncio
 import logging
 import hashlib
@@ -19,6 +24,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Literal
 
+from cryptography.fernet import Fernet, InvalidToken
+import qrcode
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -64,6 +71,12 @@ class User(Base):
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     address: Mapped[str | None] = mapped_column(String(300), nullable=True)
     password_hash: Mapped[str] = mapped_column(Text)
+    totp_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_pending: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_pending_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    totp_last_step: Mapped[int] = mapped_column(Integer, default=-1, server_default="-1")
+    totp_failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    totp_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     role: Mapped[str] = mapped_column(String(12), default='member')
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     opening_balance: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -211,6 +224,24 @@ class AuthSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     csrf_token: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    user_agent: Mapped[str] = mapped_column(String(180), default="")
+
+
+class LoginChallenge(Base):
+    __tablename__ = "auth_login_challenges"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TotpRecoveryCode(Base):
+    __tablename__ = "auth_recovery_codes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), index=True)
 
 
 class PasswordResetToken(Base):
@@ -242,6 +273,14 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(254)'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(300)'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending TEXT'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending_until TIMESTAMPTZ'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step INTEGER NOT NULL DEFAULT -1'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_failed_attempts INTEGER NOT NULL DEFAULT 0'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_locked_until TIMESTAMPTZ'))
+            conn.execute(text('ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()'))
+            conn.execute(text("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent VARCHAR(180) NOT NULL DEFAULT ''"))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
             conn.execute(text('ALTER TABLE entries ADD COLUMN IF NOT EXISTS wallet_id INTEGER REFERENCES wallets(id)'))
             conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS wallet_id INTEGER REFERENCES wallets(id)'))
@@ -253,8 +292,12 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS interest_amount BIGINT NOT NULL DEFAULT 0'))
         else:
             columns = {row[1] for row in conn.execute(text('PRAGMA table_info(users)'))}
-            for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300)')]:
+            for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300'),('totp_secret','TEXT'),('totp_pending','TEXT'),('totp_pending_until','DATETIME'),('totp_last_step','INTEGER NOT NULL DEFAULT -1'),('totp_failed_attempts','INTEGER NOT NULL DEFAULT 0'),('totp_locked_until','DATETIME')]:
                 if name not in columns: conn.execute(text(f'ALTER TABLE users ADD COLUMN {name} {kind}'))
+            existing_sessions = {row[1] for row in conn.execute(text('PRAGMA table_info(auth_sessions)'))}
+            for col, definition in [('created_at', 'DATETIME'), ('user_agent', "VARCHAR(180) NOT NULL DEFAULT ''")]:
+                if col not in existing_sessions:
+                    conn.execute(text(f'ALTER TABLE auth_sessions ADD COLUMN {col} {definition}'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)'))
             for table in ('entries', 'debt_payments'):
                 existing = {row[1] for row in conn.execute(text(f'PRAGMA table_info({table})'))}
@@ -392,7 +435,7 @@ def normalized_address(value: str) -> str:
 def user_json(u):
     return {'id':u.id,'username':u.username,'email':u.email or '', 'phone':local_vietnam_phone(u.phone),
             'address':u.address or '', 'profile_complete':bool(u.email and u.phone and u.address),
-            'role':u.role,'active':u.active,'opening_balance':u.opening_balance,
+            'role':u.role,'active':u.active,'totp_enabled':bool(u.totp_secret),'opening_balance':u.opening_balance,
             'created_at':u.created_at.isoformat()}
 
 
@@ -565,10 +608,10 @@ def admin(u: User=Depends(current)):
     return u
 
 
-def start_session(db, response: Response, u: User):
+def start_session(db, response: Response, u: User, request: Request | None = None):
     token=secrets.token_urlsafe(48)
     csrf=secrets.token_hex(32)
-    db.add(AuthSession(user_id=u.id, token_hash=hashlib.sha256(token.encode()).hexdigest(),csrf_token=csrf,expires_at=utcnow()+timedelta(days=7)))
+    db.add(AuthSession(user_id=u.id, token_hash=hashlib.sha256(token.encode()).hexdigest(),csrf_token=csrf,expires_at=utcnow()+timedelta(days=7),user_agent=((request.headers.get('user-agent','') if request else '')[:180])))
     response.set_cookie(COOKIE, token, httponly=True, secure=os.environ.get('COOKIE_SECURE','false').lower()=='true', samesite='strict',max_age=604800,path='/')
     return csrf
 
@@ -732,7 +775,7 @@ def setup_status(db:Session=Depends(get_db)):
 
 
 @app.post('/api/setup')
-def setup(data:NewUser,response:Response,db:Session=Depends(get_db)):
+def setup(data:NewUser,response:Response,request:Request,db:Session=Depends(get_db)):
     # Serialize first-time setup across concurrent requests on PostgreSQL.
     if IS_POSTGRES:
         db.execute(text('SELECT pg_advisory_xact_lock(817262091)'))
@@ -746,7 +789,7 @@ def setup(data:NewUser,response:Response,db:Session=Depends(get_db)):
         db.add(u);db.flush()
         seed_categories(db,u)
         default_wallet(db,u.id)
-        csrf=start_session(db,response,u)
+        csrf=start_session(db,response,u,request)
         log(db,u.id,'setup','Khởi tạo quản trị viên')
         db.commit()
     except IntegrityError:
@@ -755,7 +798,7 @@ def setup(data:NewUser,response:Response,db:Session=Depends(get_db)):
 
 
 @app.post('/api/login')
-def login(data:Login,response:Response,db:Session=Depends(get_db)):
+def login(data:Login,response:Response,request:Request,db:Session=Depends(get_db)):
     username=data.username.strip().lower()
     u=db.scalar(select(User).where(User.username==username).with_for_update())
     if not u:
@@ -775,10 +818,235 @@ def login(data:Login,response:Response,db:Session=Depends(get_db)):
         db.commit();raise HTTPException(401,'Thông tin đăng nhập không đúng.')
     u.failed_attempts=0;u.locked_until=None
     if ph.check_needs_rehash(u.password_hash): u.password_hash=ph.hash(data.password)
-    csrf=start_session(db,response,u)
+    if u.totp_secret:
+        if u.totp_locked_until and as_utc(u.totp_locked_until)>utcnow():
+            raise HTTPException(429,'Quá nhiều mã xác thực sai. Vui lòng thử lại sau 15 phút.')
+        ticket=secrets.token_urlsafe(40)
+        db.query(LoginChallenge).filter(LoginChallenge.user_id==u.id).delete(synchronize_session=False)
+        db.add(LoginChallenge(user_id=u.id,token_hash=hashlib.sha256(ticket.encode()).hexdigest(),
+                              attempts=0,expires_at=utcnow()+timedelta(minutes=5)))
+        log(db,u.id,'login_2fa_required','Yêu cầu mã xác thực thứ hai')
+        db.commit()
+        return {'two_factor_required':True,'login_ticket':ticket}
+    csrf=start_session(db,response,u,request)
     log(db,u.id,'login','Đăng nhập')
     db.commit()
     return {'user':user_json(u),'csrf_token':csrf}
+
+
+# TOTP uses standard RFC 6238 HMAC-SHA1 with 30-second steps.
+# Secrets are encrypted at rest with a random Fernet key stored in .env, NOT in the database.
+def totp_cipher():
+    key=os.environ.get('TOTP_ENCRYPTION_KEY','').strip()
+    if not key:
+        raise HTTPException(503,'Chưa có khóa TOTP. Khởi động bằng scripts/start.ps1 để tạo khóa vào .env.')
+    try:
+        return Fernet(key.encode('ascii'))
+    except (ValueError,TypeError):
+        raise HTTPException(503,'Khóa TOTP không hợp lệ. Kiểm tra .env.')
+
+
+def totp_decrypt(encrypted):
+    try:
+        return totp_cipher().decrypt(encrypted.encode('ascii')).decode('ascii')
+    except (InvalidToken,ValueError):
+        raise HTTPException(503,'Không thể giải mã TOTP. Kiểm tra khóa TOTP trong .env cũ.')
+
+
+def totp_value(secret, step):
+    raw=base64.b32decode(secret,casefold=True)
+    digest=hmac.new(raw,struct.pack('>Q',step),hashlib.sha1).digest()
+    offset=digest[-1]&0x0f
+    value=(struct.unpack('>I',digest[offset:offset+4])[0]&0x7fffffff)%1_000_000
+    return f'{value:06d}'
+
+
+def totp_check(secret, code, last_step=-1):
+    if not re.fullmatch(r'\d{6}',code):
+        return None
+    now_step=int(time.time())//30
+    for step in (now_step-1,now_step,now_step+1):
+        if step>last_step and hmac.compare_digest(totp_value(secret,step),code):
+            return step
+    return None
+
+
+def recovery_hash(code):
+    return hashlib.sha256(code.replace('-','').replace(' ','').upper().encode('ascii')).hexdigest()
+
+
+def validate_totp_or_recovery(db,u,code):
+    code=code.strip().replace(' ','').replace('-','')
+    if not u.totp_secret: return False
+    # Recovery codes must remain usable if a user's TOTP encryption key was lost.
+    # Lookup is constant-format and uses a high-entropy, one-time SHA-256 hash.
+    if re.fullmatch(r'[0-9A-Fa-f]{20}',code):
+        hsh=recovery_hash(code)
+        found=db.scalar(select(TotpRecoveryCode).where(TotpRecoveryCode.user_id==u.id,TotpRecoveryCode.code_hash==hsh).with_for_update())
+        if found:
+            db.delete(found)
+            return True
+        return False
+    if not re.fullmatch(r'\d{6}',code): return False
+    step=totp_check(totp_decrypt(u.totp_secret),code,int(u.totp_last_step or -1))
+    if step is not None:
+        u.totp_last_step=step
+        return True
+    return False
+
+
+class TotpCode(BaseModel):
+    code: str = Field(min_length=6,max_length=32)
+
+
+class LoginOtp(TotpCode):
+    login_ticket: str = Field(min_length=32,max_length=200)
+
+
+class DisableTotp(TotpCode):
+    password: str
+
+
+class TotpSetupPassword(BaseModel):
+    password: str
+
+
+@app.post('/api/login-otp')
+def verify_login_otp(data:LoginOtp,request:Request,response:Response,db:Session=Depends(get_db)):
+    hashed=hashlib.sha256(data.login_ticket.encode()).hexdigest()
+    challenge=db.scalar(select(LoginChallenge).where(LoginChallenge.token_hash==hashed).with_for_update())
+    if not challenge or as_utc(challenge.expires_at)<=utcnow() or challenge.attempts>=5:
+        raise HTTPException(401,'Mã đăng nhập hết hạn. Hãy đăng nhập lại bằng mật khẩu.')
+    u=db.scalar(select(User).where(User.id==challenge.user_id).with_for_update())
+    if not u or not u.active or not u.totp_secret:
+        raise HTTPException(401,'Không thể xác minh đăng nhập.')
+    if u.totp_locked_until and as_utc(u.totp_locked_until)>utcnow():
+        raise HTTPException(429,'Quá nhiều mã xác thực sai. Vui lòng thử lại sau 15 phút.')
+    if not validate_totp_or_recovery(db,u,data.code):
+        u.totp_failed_attempts+=1
+        if u.totp_failed_attempts>=5:
+            u.totp_failed_attempts=0
+            u.totp_locked_until=utcnow()+timedelta(minutes=15)
+        challenge.attempts+=1
+        if challenge.attempts>=5: db.delete(challenge)
+        log(db,u.id,'login_2fa_failed','Sai mã 2FA')
+        db.commit()
+        raise HTTPException(401,'Mã xác thực không hợp lệ hoặc đã dùng. Tối đa 5 lần thử.')
+    u.totp_failed_attempts=0;u.totp_locked_until=None
+    db.query(LoginChallenge).filter(LoginChallenge.user_id==u.id).delete(synchronize_session=False)
+    csrf=start_session(db,response,u,request)
+    log(db,u.id,'login_2fa_success','Xác thực hai bước thành công')
+    db.commit()
+    return {'user':user_json(u),'csrf_token':csrf}
+
+
+@app.get('/api/security/status')
+def security_status(request:Request,db:Session=Depends(get_db)):
+    u,_=session_lookup(request,db)
+    return {'totp_enabled':bool(u.totp_secret),'totp_configured':bool(os.environ.get('TOTP_ENCRYPTION_KEY','').strip()),
+            'recovery_codes_remaining':db.scalar(select(func.count(TotpRecoveryCode.id)).where(TotpRecoveryCode.user_id==u.id))}
+
+
+@app.post('/api/security/totp/setup')
+def totp_setup(data:TotpSetupPassword,request:Request,db:Session=Depends(get_db)):
+    u,_=session_lookup(request,db)
+    try: password_ok=ph.verify(u.password_hash,data.password)
+    except (VerifyMismatchError,VerificationError): password_ok=False
+    if not password_ok: raise HTTPException(403,'Mật khẩu hiện tại không đúng.')
+    if u.totp_secret: raise HTTPException(409,'TOTP đã được bật.')
+    secret=base64.b32encode(secrets.token_bytes(20)).decode('ascii').rstrip('=')
+    u.totp_pending=totp_cipher().encrypt(secret.encode()).decode('ascii')
+    u.totp_pending_until=utcnow()+timedelta(minutes=10)
+    db.commit()
+    uri=f'otpauth://totp/{quote("MoneyFlow:"+u.username)}?secret={secret}&issuer=MoneyFlow&algorithm=SHA1&digits=6&period=30'
+    qr=qrcode.QRCode(box_size=5,border=3);qr.add_data(uri);qr.make(fit=True)
+    output=io.BytesIO();qr.make_image(fill_color='#131c31',back_color='#ffffff').save(output,format='PNG')
+    return {'secret':secret,'qr_data_url':'data:image/png;base64,'+base64.b64encode(output.getvalue()).decode(),
+            'expires_in_seconds':600}
+
+
+@app.post('/api/security/totp/enable')
+def totp_enable(data:TotpCode,request:Request,db:Session=Depends(get_db)):
+    u,_=session_lookup(request,db)
+    if u.totp_secret: raise HTTPException(409,'TOTP đã bật.')
+    if not u.totp_pending or not u.totp_pending_until or as_utc(u.totp_pending_until)<utcnow():
+        raise HTTPException(410,'Mã QR đã hết hạn. Hãy bắt đầu thiết lập lại.')
+    secret=totp_decrypt(u.totp_pending)
+    step=totp_check(secret,data.code.strip())
+    if step is None:raise HTTPException(422,'Mã 6 số không hợp lệ.')
+    u.totp_secret=u.totp_pending
+    u.totp_pending=None;u.totp_pending_until=None;u.totp_last_step=step;u.totp_failed_attempts=0;u.totp_locked_until=None
+    codes=[secrets.token_hex(10).upper() for _ in range(8)]
+    db.query(TotpRecoveryCode).filter(TotpRecoveryCode.user_id==u.id).delete(synchronize_session=False)
+    for code in codes:
+        db.add(TotpRecoveryCode(user_id=u.id,code_hash=recovery_hash(code)))
+    db.query(AuthSession).filter(AuthSession.user_id==u.id,
+        AuthSession.token_hash!=hashlib.sha256(request.cookies[COOKIE].encode()).hexdigest()).delete(synchronize_session=False)
+    log(db,u.id,'totp_enabled','Đã bật xác thực hai bước và thu hồi phiên khác')
+    db.commit()
+    return {'ok':True,'recovery_codes':codes}
+
+
+@app.post('/api/security/totp/disable')
+def totp_disable(data:DisableTotp,request:Request,db:Session=Depends(get_db)):
+    u,s=session_lookup(request,db)
+    if not u.totp_secret: raise HTTPException(409,'TOTP chưa bật.')
+    try: ok=ph.verify(u.password_hash,data.password)
+    except (VerifyMismatchError,VerificationError): ok=False
+    if not ok or not validate_totp_or_recovery(db,u,data.code):
+        raise HTTPException(403,'Mật khẩu hoặc mã TOTP/mã dự phòng không chính xác.')
+    u.totp_secret=None;u.totp_pending=None;u.totp_pending_until=None;u.totp_last_step=-1;u.totp_failed_attempts=0;u.totp_locked_until=None
+    db.query(TotpRecoveryCode).filter(TotpRecoveryCode.user_id==u.id).delete(synchronize_session=False)
+    db.query(LoginChallenge).filter(LoginChallenge.user_id==u.id).delete(synchronize_session=False)
+    db.query(AuthSession).filter(AuthSession.user_id==u.id,AuthSession.id!=s.id).delete(synchronize_session=False)
+    log(db,u.id,'totp_disabled','Đã tắt 2FA và thu hồi phiên khác')
+    db.commit()
+    return {'ok':True}
+
+
+@app.get('/api/security/sessions')
+def security_sessions(request:Request,db:Session=Depends(get_db)):
+    u,current_session=session_lookup(request,db)
+    rows=list(db.scalars(select(AuthSession).where(AuthSession.user_id==u.id).order_by(AuthSession.id.desc())))
+    return {'items':[{'id':x.id,'current':x.id==current_session.id,'user_agent':x.user_agent or 'Thiết bị chưa rõ',
+             'created_at':(x.created_at or utcnow()).isoformat(), 'expires_at':x.expires_at.isoformat()} for x in rows]}
+
+
+@app.delete('/api/security/sessions/{session_id}')
+def security_revoke_session(session_id:int,request:Request,db:Session=Depends(get_db)):
+    u,s=session_lookup(request,db)
+    target=db.scalar(select(AuthSession).where(AuthSession.id==session_id,AuthSession.user_id==u.id))
+    if not target:raise HTTPException(404,'Không tìm thấy phiên đăng nhập.')
+    if target.id==s.id: raise HTTPException(409,'Dùng nút Đăng xuất để đóng phiên hiện tại.')
+    db.delete(target);log(db,u.id,'session_revoked',str(session_id));db.commit()
+    return {'ok':True}
+
+
+@app.post('/api/security/sessions/revoke-others')
+def security_revoke_others(request:Request,db:Session=Depends(get_db)):
+    u,s=session_lookup(request,db)
+    result=db.query(AuthSession).filter(AuthSession.user_id==u.id,AuthSession.id!=s.id).delete(synchronize_session=False)
+    log(db,u.id,'sessions_revoked',str(result));db.commit()
+    return {'ok':True,'revoked':result}
+
+
+@app.get('/api/security/integrity')
+def security_integrity(request:Request,db:Session=Depends(get_db)):
+    u,_=session_lookup(request,db)
+    checks=[]
+    wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==u.id)))
+    for w in wallets:
+        balance=wallet_balance(db,w)
+        if balance<0: checks.append({'kind':'negative_wallet','detail':f'Ví {w.id} có số dư âm: {balance}'})
+    for d in db.scalars(select(Debt).where(Debt.user_id==u.id)):
+        paid=db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(DebtPayment.debt_id==d.id,DebtPayment.user_id==u.id)) or 0
+        if d.remaining<0 or d.remaining>d.principal or d.principal-int(paid)!=d.remaining:
+            checks.append({'kind':'invalid_debt','detail':f'Khoản nợ #{d.id} có số gốc hoặc lịch sử thanh toán không khớp.'})
+    linked=db.execute(select(Entry.id,Entry.wallet_id,Wallet.user_id).outerjoin(Wallet,Entry.wallet_id==Wallet.id).where(Entry.user_id==u.id)).all()
+    for eid,wid,wuid in linked:
+        if wid is None or wuid!=u.id:
+            checks.append({'kind':'invalid_wallet_link','detail':f'Giao dịch #{eid} không liên kết đúng ví.'})
+    return {'ok':not checks,'checked_wallets':len(wallets),'checked_entries':len(linked),'issues':checks[:100]}
 
 
 @app.get('/api/me')
@@ -804,6 +1072,7 @@ def change_password(data:ChangePassword,request:Request,db:Session=Depends(get_d
     safe_password(data.new_password)
     if data.old_password==data.new_password: raise HTTPException(422,'Mật khẩu mới phải khác mật khẩu cũ.')
     u.password_hash=ph.hash(data.new_password)
+    db.query(LoginChallenge).filter(LoginChallenge.user_id==u.id).delete(synchronize_session=False)
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id==u.id).delete(synchronize_session=False)
     db.query(AuthSession).filter(AuthSession.user_id==u.id,AuthSession.id!=s.id).delete(synchronize_session=False)
     log(db,u.id,'password_changed','Đã đổi mật khẩu và thu hồi phiên khác')
@@ -907,6 +1176,7 @@ def reset_password_by_email(data:CompleteReset,db:Session=Depends(get_db)):
     reset.used_at=utcnow()
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id==u.id,
             PasswordResetToken.id!=reset.id).delete(synchronize_session=False)
+    db.query(LoginChallenge).filter(LoginChallenge.user_id==u.id).delete(synchronize_session=False)
     db.query(AuthSession).filter(AuthSession.user_id==u.id).delete(synchronize_session=False)
     log(db,u.id,'password_recovered','Đặt lại mật khẩu qua email; thu hồi mọi phiên')
     db.commit()
@@ -1626,6 +1896,7 @@ def reset_user_password(user_id:int,data:ResetPassword,u:User=Depends(admin),db:
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id==target.id).delete(synchronize_session=False)
     target.failed_attempts=0
     target.locked_until=None
+    db.query(LoginChallenge).filter(LoginChallenge.user_id==target.id).delete(synchronize_session=False)
     db.query(AuthSession).filter(AuthSession.user_id==target.id).delete(synchronize_session=False)
     log(db,u.id,'user_password_reset',str(user_id));db.commit();return {'ok':True}
 
@@ -1640,6 +1911,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     if target.role=='admin' and target.active: cannot_remove_last_admin(db,target)
     # Delete dependents in FK-safe order; anonymous audit records preserve chronology.
     db.query(AuthSession).filter(AuthSession.user_id==target.id).delete(synchronize_session=False)
+    db.query(LoginChallenge).filter(LoginChallenge.user_id==target.id).delete(synchronize_session=False)
+    db.query(TotpRecoveryCode).filter(TotpRecoveryCode.user_id==target.id).delete(synchronize_session=False)
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id==target.id).delete(synchronize_session=False)
     db.query(RecurringRun).filter(RecurringRun.user_id==target.id).delete(synchronize_session=False)
     db.query(RecurringRule).filter(RecurringRule.user_id==target.id).delete(synchronize_session=False)

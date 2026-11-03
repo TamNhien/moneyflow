@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ['DATABASE_URL'] = 'sqlite:///' + str(ROOT / ('test-'+uuid4().hex+'.db'))
+from cryptography.fernet import Fernet
+os.environ['TOTP_ENCRYPTION_KEY'] = Fernet.generate_key().decode('ascii')
 from backend.app import app
 
 
@@ -615,3 +617,93 @@ def test_reports_cashflow_excel_pdf_and_isolation(client):
     other=client.get('/api/reports?end=2026-11&months=3').json()
     assert other['totals']['income']!=60000
     assert all(c['amount']!=40000 for c in other['categories'])
+
+
+def test_two_factor_authenticator_and_session_control(client):
+    from backend.app import totp_value, totp_decrypt, SessionLocal, User
+    from time import time
+    from sqlalchemy import select
+    from fastapi.testclient import TestClient
+
+    admin_login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert admin_login.status_code==200,admin_login.text
+    t=admin_login.json()['csrf_token']
+    account=credentials('secureacct')
+    assert auth_post(client,'/api/users',account,csrf=t).status_code==200
+    owner_client=TestClient(app)
+    try:
+        login=auth_post(owner_client,'/api/login',{'username':'secureacct','password':account['password']})
+        assert login.status_code==200,login.text
+        csrf=login.json()['csrf_token']
+        assert owner_client.get('/api/security/status').json()['totp_enabled'] is False
+        assert owner_client.get('/api/security/integrity').json()['ok'] is True
+        assert auth_post(owner_client,'/api/security/totp/setup',{'password':'bad'},csrf=csrf).status_code==403
+        begin=auth_post(owner_client,'/api/security/totp/setup',{'password':account['password']},csrf=csrf)
+        assert begin.status_code==200,begin.text
+        secret=begin.json()['secret']
+        assert begin.json()['qr_data_url'].startswith('data:image/png;base64,')
+        with SessionLocal() as db:
+            u=db.scalar(select(User).where(User.username=='secureacct'))
+            assert u.totp_secret is None
+            assert secret not in u.totp_pending
+            assert totp_decrypt(u.totp_pending)==secret
+        code=totp_value(secret,int(time())//30)
+        invalid=auth_post(owner_client,'/api/security/totp/enable',{'code':'000000' if code!='000000' else '111111'},csrf=csrf)
+        assert invalid.status_code==422
+        enabled=auth_post(owner_client,'/api/security/totp/enable',{'code':code},csrf=csrf)
+        assert enabled.status_code==200,enabled.text
+        recovery=enabled.json()['recovery_codes']; assert len(recovery)==8
+        assert owner_client.get('/api/security/status').json()['recovery_codes_remaining']==8
+        sessions=owner_client.get('/api/security/sessions').json()['items'];assert len(sessions)==1
+        assert sessions[0]['current'] is True
+        # Incorrect TOTP cannot produce an authenticated session; old OTP cannot be reused.
+        separate=TestClient(app)
+        challenged=auth_post(separate,'/api/login',{'username':'secureacct','password':account['password']})
+        assert challenged.status_code==200 and challenged.json()['two_factor_required'] is True
+        assert separate.get('/api/me').status_code==401
+        ticket=challenged.json()['login_ticket']
+        wrong=auth_post(separate,'/api/login-otp',{'login_ticket':ticket,'code':'000000' if code!='000000' else '111111'})
+        assert wrong.status_code==401
+        replay=auth_post(separate,'/api/login-otp',{'login_ticket':ticket,'code':code})
+        assert replay.status_code==401  # enrollment consumed same step
+        # Recovery codes are one-use and stored only by SHA-256.
+        allowed=auth_post(separate,'/api/login-otp',{'login_ticket':ticket,'code':recovery[0]})
+        assert allowed.status_code==200,allowed.text
+        newcsrf=allowed.json()['csrf_token']
+        assert separate.get('/api/me').status_code==200
+        sessions=owner_client.get('/api/security/sessions').json()['items'];assert len(sessions)==2
+        revoked=auth_post(owner_client,'/api/security/sessions/revoke-others',{},csrf=csrf)
+        assert revoked.status_code==200 and revoked.json()['revoked']==1
+        assert separate.get('/api/me').status_code==401
+        assert owner_client.get('/api/security/status').json()['recovery_codes_remaining']==7
+        # Account-level throttle survives repeated password logins / new OTP tickets.
+        throttle=auth_post(separate,'/api/login',{'username':'secureacct','password':account['password']})
+        ticket2=throttle.json()['login_ticket']
+        invalid='000000' if code!='000000' else '111111'
+        for _ in range(5):
+            bad=auth_post(separate,'/api/login-otp',{'login_ticket':ticket2,'code':invalid})
+            assert bad.status_code==401
+        assert auth_post(separate,'/api/login',{'username':'secureacct','password':account['password']}).status_code==429
+        with SessionLocal.begin() as db:
+            locked=db.scalar(select(User).where(User.username=='secureacct'))
+            assert locked.totp_locked_until is not None
+            locked.totp_locked_until=None  # isolated test cleanup
+        # Disabling 2FA requires password AND a different backup code.
+        denied=auth_post(owner_client,'/api/security/totp/disable',{'password':'wrong','code':recovery[1]},csrf=csrf)
+        assert denied.status_code==403
+        disabled=auth_post(owner_client,'/api/security/totp/disable',{'password':account['password'],'code':recovery[1]},csrf=csrf)
+        assert disabled.status_code==200,disabled.text
+        assert owner_client.get('/api/security/status').json()['totp_enabled'] is False
+        assert owner_client.get('/api/security/status').json()['recovery_codes_remaining']==0
+        ordinary=auth_post(separate,'/api/login',{'username':'secureacct','password':account['password']})
+        assert ordinary.status_code==200 and not ordinary.json().get('two_factor_required')
+    finally:
+        owner_client.close()
+
+def test_export_controls_are_unambiguous():
+    source=(ROOT/'frontend'/'app.js').read_text()
+    assert 'data-action="report-excel"' in source
+    assert 'data-action="report-pdf"' in source
+    assert 'Xuất Excel <small>.XLSX</small>' in source
+    assert 'Xuất PDF <small>.PDF</small>' in source
+    assert "downloadReport('xlsx')" in source and "downloadReport('pdf')" in source

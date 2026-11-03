@@ -54,3 +54,42 @@ with TestClient(app):
         result = subprocess.run([sys.executable, '-c', script], cwd=root,
                                 env=env, capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stdout + '\n' + result.stderr
+
+
+def test_v115_user_and_session_columns_upgrade_without_data_loss(tmp_path):
+    """Regression: PostgreSQL/SQLite v1.0.15 users and auth_sessions had no 2FA fields."""
+    database = tmp_path / 'v115_existing.sqlite'
+    con=sqlite3.connect(database)
+    con.executescript('''
+      CREATE TABLE users (
+       id INTEGER PRIMARY KEY, username VARCHAR(32), display_name VARCHAR(80),
+       email VARCHAR(254), phone VARCHAR(20), address VARCHAR(300),
+       password_hash TEXT NOT NULL, role VARCHAR(12), active BOOLEAN,
+       opening_balance BIGINT NOT NULL, failed_attempts INTEGER,
+       locked_until DATETIME, created_at DATETIME);
+      CREATE TABLE auth_sessions (
+       id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
+       token_hash VARCHAR(64), csrf_token VARCHAR(64), expires_at DATETIME);
+      INSERT INTO users VALUES (33,'existing','Existing','existing@example.com',
+       '0901234567','HCM','hashed','member',1,250000,0,NULL,'2026-11-01');
+      INSERT INTO auth_sessions VALUES (55,33,'abc','csrf','2099-01-01');
+    ''')
+    con.commit(); con.close()
+    root=Path(__file__).resolve().parents[1]
+    env={**os.environ,'DATABASE_URL':'sqlite:///'+str(database),'PYTHONPATH':str(root)}
+    code='''from fastapi.testclient import TestClient
+from sqlalchemy import select
+from backend.app import app,SessionLocal,User,AuthSession,Wallet
+with TestClient(app):
+ with SessionLocal() as db:
+  u=db.get(User,33)
+  assert u.username=='existing' and u.opening_balance==250000 and u.totp_secret is None
+  assert u.totp_last_step==-1 and u.totp_failed_attempts==0
+  old=db.get(AuthSession,55)
+  assert old.user_id==33
+  assert old.user_agent==''
+  assert len(list(db.scalars(select(Wallet).where(Wallet.user_id==33))))==1
+'''
+    for _ in range(2):
+        result=subprocess.run([sys.executable,'-c',code],cwd=root,env=env,capture_output=True,text=True,timeout=30)
+        assert result.returncode==0,result.stdout+'\n'+result.stderr

@@ -25,6 +25,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://moneyflow:${DB_PASSWORD}@db:5432/moneyflow
       COOKIE_SECURE: "true"
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       APP_BASE_URL: https://127.0.0.1:8765
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}

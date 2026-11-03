@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.15
+# MoneyFlow Local v1.0.16
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -151,7 +151,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.15
+.\scripts\publish.ps1 -Version 1.0.16
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -164,7 +164,7 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.15
+.\scripts\publish.ps1 -Version 1.0.16
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
@@ -200,6 +200,20 @@ Menu **Báo cáo tài chính** cho phép chọn 3, 6, 12 hoặc 24 tháng tính 
 - Chuyển tiền qua lại giữa các ví **không tính là thu/chi**, tiền trả nợ gốc/lãi không cộng hai lần vào chi phí. Số dư ví/nợ/tài sản ròng là **số liệu tại thời điểm xuất**; không suy luận thành số dư chốt cuối các tháng trong quá khứ.
 - Docker cài gói font DejaVu trong image để PDF hiển thị dấu tiếng Việt, không cần tải font thủ công trên Windows.
 
+## Bảo mật nâng cao (v1.0.16)
+
+- Trong **Cài đặt → Bảo mật nâng cao**, bật **Xác thực hai bước (TOTP)**. Đầu tiên nhập mật khẩu tài khoản, sau đó quét QR bằng Google Authenticator/Microsoft Authenticator, nhập mã 6 số và **lưu riêng 8 mã dự phòng** hiển thị một lần. Không bật TOTP trước khi hoàn tất bước xác nhận mã.
+- TOTP theo chuẩn RFC 6238, chu kỳ 30 giây, cho lệch thời gian tối đa một kỳ; hạn chế tái sử dụng mã, khóa tạm sau 5 lần nhập sai. Mỗi mã dự phòng chỉ dùng một lần và chỉ lưu dạng SHA-256 trong PostgreSQL.
+- Bí mật TOTP trong database **được mã hóa bằng Fernet**, khóa `TOTP_ENCRYPTION_KEY` 256-bit được `scripts/start.ps1` sinh một lần và lưu trong **.env trên máy Windows**. Không đưa khóa vào GitHub. **Không thay hoặc xóa khóa này** khi người dùng đã bật 2FA, vì sẽ không thể giải mã bí mật TOTP cũ.
+- Sau khi nhập đúng tên đăng nhập/mật khẩu, người dùng bật 2FA phải nhập mã TOTP/mã dự phòng; phiên `HttpOnly` chưa được cấp cho đến khi hoàn tất hai bước. Thời hạn yêu cầu 2FA là 5 phút.
+- Trong **Phiên đăng nhập**, xem thời điểm tạo và trình duyệt, thu hồi một phiên hoặc tất cả phiên khác. Không có tính năng giám sát thiết bị từ xa.
+- Trong **Kiểm tra số dư**, ứng dụng đọc kiểm tra số dư ví âm, khoản nợ và đối chiếu gốc đã thanh toán, giao dịch liên kết sai ví. Đây là kiểm tra phát hiện bất thường, **không tự sửa** cơ sở dữ liệu và không thay thế đối soát với sao kê ngân hàng.
+- Mật khẩu tiếp tục được băm Argon2id; OTP và mã dự phòng **không thay thế** mật khẩu tài khoản. Nếu mất điện thoại TOTP, dùng một mã dự phòng đã lưu; email khôi phục mật khẩu không tự tắt 2FA.
+
+### Xuất báo cáo được phân biệt rõ
+
+Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tượng, màu và tên **Xuất Excel .XLSX** (xanh) / **Xuất PDF .PDF** (đỏ). Khi tải, trình duyệt kiểm tra MIME và chữ ký tệp để chặn việc nhầm nội dung giữa hai định dạng. Chức năng Excel vẫn có 6 sheet, PDF A4 tiếng Việt; API và dữ liệu báo cáo giữ nguyên.
+
 ## Lịch sử phát triển (một README.md)
 
 | Phiên bản | Nội dung |
@@ -220,5 +234,6 @@ Menu **Báo cáo tài chính** cho phép chọn 3, 6, 12 hoặc 24 tháng tính 
 | **v1.0.13** | **Sửa các hàm frontend bị thiếu khiến trang Tổng quan trống; khôi phục toàn bộ màn hình Ví, Người dùng và Nhật ký; bổ sung kiểm thử tự động 9 màn hình trong PowerShell và GitHub Actions.** |
 | v1.0.14 | **Thu/chi định kỳ theo ví, chế độ xác nhận hoặc tự ghi, lịch sử chống trùng, nhắc trước hạn cho lịch và nợ, dashboard nhận thông báo, 10 màn hình frontend và 12 kiểm thử API/migration.** |
 | **v1.0.15** | **Báo cáo theo 3/6/12/24 tháng, so sánh thu chi, tính dòng tiền có xét trả/thu hồi nợ và loại trừ chuyển ví nội bộ; tổng tài sản ròng hiện tại; xuất Excel 6 sheet và PDF tiếng Việt; kiểm thử API và frontend cho báo cáo.** |
+| **v1.0.16** | **Phân biệt trực quan nút Excel/PDF, xác nhận MIME/chữ ký tệp; TOTP Authenticator có QR, mã dự phòng một lần, mã hóa bí mật trong DB, khóa sau nhiều lần nhập sai, quản lý phiên, kiểm tra nhất quán dữ liệu và migration không mất tài khoản cũ.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.

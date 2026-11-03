@@ -121,3 +121,12 @@ assert.match(element('#page-content').innerHTML,/Xuất Excel/);
 assert.match(element('#page-content').innerHTML,/Xuất PDF/);
 assert.match(element('#page-content').innerHTML,/Tài sản ròng/);
 console.log('Financial reports smoke PASS: chart, filters, export controls, net worth.');
+
+assert.match(element('#page-content').innerHTML, /data-action="report-excel"/);
+assert.match(element('#page-content').innerHTML, /data-action="report-pdf"/);
+assert.match(element('#page-content').innerHTML, /\.XLSX/);
+assert.match(element('#page-content').innerHTML, /\.PDF/);
+await runInContext('navigate("settings")',context);
+assert.match(element('#page-content').innerHTML,/Bật xác thực 2 bước/);
+assert.match(element('#page-content').innerHTML,/Phiên đăng nhập/);
+console.log('Security & export smoke PASS: TOTP setup, sessions and distinct Excel/PDF buttons.');
