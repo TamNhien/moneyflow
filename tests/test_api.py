@@ -1171,3 +1171,116 @@ def test_smart_budget_pending_recurring_not_double_counted(client):
         assert updated['scheduled_remaining']==initial['scheduled_remaining']-2000
         # Test uses transaction rollback, never posts a real schedule or payment.
         db.rollback()
+
+
+def test_transaction_receipts_private_validated_and_removed(client, monkeypatch, tmp_path):
+    """Evidence is private, immutable, format-checked and cleaned up with its entry."""
+    import base64
+    import hashlib
+    import io
+    from PIL import Image
+    from fastapi.testclient import TestClient
+    from backend import app as app_module
+    from backend.app import SessionLocal, Receipt
+    from sqlalchemy import select
+
+    monkeypatch.setattr(app_module, 'RECEIPTS_DIR', tmp_path / 'private-evidence')
+    login_admin = auth_post(client, '/api/login',
+                            {'username':'owner','password':'SecurePassword@12345'})
+    assert login_admin.status_code == 200, login_admin.text
+    admin_csrf = login_admin.json()['csrf_token']
+    for name in ('evidence22', 'evidence22b'):
+        result = auth_post(client, '/api/users', credentials(name), csrf=admin_csrf)
+        assert result.status_code == 200, result.text
+
+    with TestClient(app) as first, TestClient(app) as other:
+        response = auth_post(first, '/api/login',
+                             {'username':'evidence22','password':'SecurePassword@12345'})
+        assert response.status_code == 200
+        csrf = response.json()['csrf_token']
+        assert auth_post(other, '/api/login',
+                         {'username':'evidence22b','password':'SecurePassword@12345'}).status_code == 200
+        foreign_csrf = other.get('/api/me').json()['csrf_token']
+        cat = next(c for c in first.get('/api/categories').json() if c['kind']=='income')
+        entry = auth_post(first,'/api/transactions',{'title':'Tiền thưởng có hóa đơn',
+            'kind':'income','amount':32000,'category_id':cat['id'], 'occurred_on':'2026-11-04'},csrf=csrf)
+        assert entry.status_code == 200,entry.text
+        entry_id = entry.json()['id']
+        url = f'/api/transactions/{entry_id}/receipts'
+        png = io.BytesIO()
+        Image.new('RGB',(24,16),(45,120,200)).save(png,format='PNG')
+        raw_png = png.getvalue()
+        encoded = base64.b64encode(raw_png).decode()
+        document={'name':'hoa-don.png', 'data_base64':encoded}
+        assert auth_post(first,url,document).status_code == 403  # CSRF still mandatory
+        assert auth_post(other,url,document,csrf=foreign_csrf).status_code == 404
+        assert other.get(url).status_code == 404
+        assert auth_post(first,url,{'name':'../../hoa-don.exe','data_base64':encoded},csrf=csrf).status_code == 415
+        assert auth_post(first,url,{'name':'fake.png','data_base64':base64.b64encode(b'not an image').decode()},csrf=csrf).status_code == 415
+        assert auth_post(first,url,{'name':'fake.pdf','data_base64':encoded},csrf=csrf).status_code == 415
+        assert auth_post(first,url,{'name':'x.jpg','data_base64':'bad^^base64'},csrf=csrf).status_code == 422
+        created=auth_post(first,url,document,csrf=csrf)
+        assert created.status_code == 200,created.text
+        obj=created.json()
+        assert obj['name']=='hoa-don.png' and obj['sha256']==hashlib.sha256(raw_png).hexdigest()
+        with SessionLocal() as db:
+            row=db.scalar(select(Receipt).where(Receipt.id == obj['id']))
+            assert row and row.storage_key != obj['name']
+            saved=app_module.receipt_path(row.storage_key)
+            assert saved.read_bytes()==raw_png
+        listed=first.get(url)
+        assert listed.status_code==200 and listed.json()['items'][0]['id']==obj['id']
+        assert first.get('/api/transactions').json()['items'][0]['receipt_count']==1
+        inventory=first.get('/api/receipts').json()
+        assert inventory['total']==1 and inventory['items'][0]['entry_title']=='Tiền thưởng có hóa đơn'
+        assert first.get('/api/receipts?kind=image&month=2026-11').json()['total']==1
+        assert first.get('/api/receipts?q=hoa-don').json()['total']==1
+        assert first.get('/api/receipts?kind=pdf').json()['total']==0
+        assert first.get('/api/receipts?month=2025-01').json()['total']==0
+        assert first.get('/api/receipts?month=not-a-month').status_code==422
+        assert first.get('/api/receipts?kind=exe').status_code==422
+        assert first.get('/api/receipts?page=-1').status_code==422
+        assert other.get('/api/receipts').json()['total']==0
+        download=first.get(f"/api/receipts/{obj['id']}/file")
+        assert download.status_code==200 and download.content==raw_png
+        assert 'attachment' in download.headers['content-disposition']
+        assert download.headers['x-content-type-options']=='nosniff'
+        # Altered bytes must not be served with the original file's trusted metadata.
+        saved.write_bytes(b'corrupted evidence')
+        assert first.get(f"/api/receipts/{obj['id']}/file").status_code==409
+        saved.write_bytes(raw_png)
+        too_large=base64.b64encode(b'x' * (8*1024*1024+1)).decode()
+        assert auth_post(first,url,{'name':'big.png','data_base64':too_large},csrf=csrf).status_code==413
+        assert other.get(f"/api/receipts/{obj['id']}/file").status_code==404
+        assert auth_post(other,f"/api/receipts/{obj['id']}",csrf=foreign_csrf,method='delete').status_code==404
+        # Multiple attachments and per-transaction limit.
+        for i in range(7):
+            assert auth_post(first,url,{'name':f'anh-{i}.png','data_base64':encoded},csrf=csrf).status_code==200
+        assert auth_post(first,url,document,csrf=csrf).status_code==409
+        assert len(first.get(url).json()['items'])==8
+        assert auth_post(first,f"/api/receipts/{obj['id']}",csrf=csrf,method='delete').status_code==200
+        assert not saved.exists()
+        pdf=b'%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n'
+        pdf_result=auth_post(first,url,{'name':'chung-tu.pdf','data_base64':base64.b64encode(pdf).decode()},csrf=csrf)
+        assert pdf_result.status_code==200,pdf_result.text
+        assert first.get(f"/api/receipts/{pdf_result.json()['id']}/file").content==pdf
+        assert auth_post(first,f'/api/transactions/{entry_id}',csrf=csrf,method='delete').status_code==200
+        assert first.get(url).status_code==404
+        assert first.get(f"/api/receipts/{pdf_result.json()['id']}/file").status_code==404
+        assert not list((tmp_path / 'private-evidence').iterdir())
+        # New user can have identical original filename without sharing files.
+        foreign_cat=next(c for c in other.get('/api/categories').json() if c['kind']=='income')
+        foreign_entry=auth_post(other,'/api/transactions',{'title':'Khác','kind':'income',
+            'amount':100,'category_id':foreign_cat['id'],'occurred_on':'2026-11-04'},csrf=foreign_csrf)
+        assert foreign_entry.status_code==200
+        other_id=foreign_entry.json()['id']
+        assert auth_post(other,f'/api/transactions/{other_id}/receipts',document,csrf=foreign_csrf).status_code==200
+        assert first.get(f'/api/transactions/{other_id}/receipts').status_code==404
+        with SessionLocal() as db:
+            from backend.app import User
+            foreign_user=db.scalar(select(User).where(User.username=='evidence22b'))
+            foreign_user_id=foreign_user.id
+        deletion=auth_post(client,f'/api/users/{foreign_user_id}',
+                           {'confirm_username':'evidence22b'},method='delete',csrf=admin_csrf)
+        assert deletion.status_code==200,deletion.text
+        assert not list((tmp_path/'private-evidence').iterdir())

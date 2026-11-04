@@ -434,3 +434,17 @@ select option { background: #1d2b47; color: #f3f6ff; }
 @media(max-width:1200px){.smart-budget-overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.smart-budget-overview{grid-template-columns:1fr 1fr;gap:9px}.smart-kpi{padding:13px}.smart-kpi strong{font-size:18px}.smart-alert-row{flex-wrap:wrap}.smart-alert-row>span:last-child{margin-left:0;width:100%;text-align:left}}
 @media(max-width:400px){.smart-budget-overview{grid-template-columns:1fr}}
+
+/* v1.0.22: transaction evidence (images/PDF) */
+.receipt-action{white-space:nowrap;border-color:rgba(117,103,248,.4);color:#c9c3ff}
+.receipt-list{display:grid;gap:10px;margin-bottom:18px}
+.receipt-line{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid #354362;border-radius:12px;background:#192640;min-width:0}
+.receipt-icon{display:grid;place-items:center;flex:none;width:44px;height:44px;border-radius:10px;background:#34325d;color:#d5d1ff;font-size:11px;font-weight:800}
+.receipt-info{flex:1;min-width:0}
+.receipt-info strong{display:block;white-space:normal;overflow-wrap:anywhere;font-size:13px;color:#e8eafc}
+.receipt-info small{display:block;font-size:11px;color:#92a5ce;margin-top:5px}
+.receipt-buttons{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.receipt-preview{margin:12px 0;max-height:340px;overflow:auto;border-radius:12px;text-align:center;background:#101b31;padding:10px}
+.receipt-preview img{max-width:100%;max-height:310px;object-fit:contain;border-radius:6px}
+.receipt-input{padding:9px;min-height:51px}
+@media(max-width:600px){.receipt-line{flex-wrap:wrap}.receipt-buttons{width:100%;justify-content:flex-start}}

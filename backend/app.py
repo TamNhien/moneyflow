@@ -1,5 +1,8 @@
 """MoneyFlow local-first finance application API (single-origin FastAPI)."""
 import csv
+import binascii
+import uuid
+from PIL import Image, UnidentifiedImageError
 import base64
 import hmac
 import struct
@@ -31,7 +34,7 @@ from argon2.exceptions import VerifyMismatchError, VerificationError
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -50,6 +53,11 @@ USER_PATTERN = re.compile(r'^[a-z0-9_.-]{3,32}$')
 PHONE_PATTERN = re.compile(r'^\+?[0-9]{9,15}$')
 EMAIL_PATTERN = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 RESET_MINUTES = 15
+# Private transaction evidence. Data lives in a named Docker volume, never under /frontend.
+RECEIPTS_DIR = Path(os.getenv('RECEIPTS_DIR', '/opt/moneyflow/receipts'))
+MAX_RECEIPT_BYTES = 8 * 1024 * 1024
+MAX_RECEIPTS_PER_ENTRY = 8
+RECEIPT_TYPES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'application/pdf': '.pdf'}
 RESET_COOLDOWN_SECONDS = 60
 RESET_HOURLY_LIMIT = 3
 MONTH_PATTERN = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')
@@ -196,6 +204,20 @@ class Entry(Base):
     occurred_on: Mapped[date] = mapped_column(Date, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     __table_args__ = (CheckConstraint('amount > 0'),)
+
+
+class Receipt(Base):
+    """A private immutable file attached to one owner's transaction."""
+    __tablename__ = 'receipts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    entry_id: Mapped[int] = mapped_column(ForeignKey('entries.id'), index=True)
+    original_name: Mapped[str] = mapped_column(String(160))
+    mime_type: Mapped[str] = mapped_column(String(40))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    storage_key: Mapped[str] = mapped_column(String(40), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class Debt(Base):
@@ -430,7 +452,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'no-referrer'
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -834,6 +856,11 @@ class NewEntry(BaseModel):
     occurred_on: date
     note: str=Field(default='',max_length=500)
     wallet_id: int | None = None
+
+
+class NewReceipt(BaseModel):
+    name: str = Field(min_length=1, max_length=240)
+    data_base64: str = Field(min_length=8, max_length=11_300_000)
 
 
 class Opening(BaseModel):
@@ -2132,6 +2159,171 @@ def toggle_category(category_id:int,u:User=Depends(current),db:Session=Depends(g
     return {'active':c.active}
 
 
+def receipt_type(content: bytes) -> str | None:
+    # Derive content type from file bytes; do not trust a client-supplied MIME label.
+    if content.startswith(b'\xff\xd8\xff') and content.endswith(b'\xff\xd9'):
+        return 'image/jpeg'
+    if content.startswith(b'\x89PNG\r\n\x1a\n') and len(content) > 24 and content[12:16] == b'IHDR':
+        return 'image/png'
+    if content.startswith(b'RIFF') and content[8:12] == b'WEBP' and len(content) >= 16:
+        return 'image/webp'
+    if content.startswith(b'%PDF-') and b'%%EOF' in content[-1024:]:
+        return 'application/pdf'
+    return None
+
+
+def receipt_path(key: str) -> Path:
+    if not re.fullmatch(r'[0-9a-f]{32}\.(?:jpg|png|webp|pdf)', key):
+        raise HTTPException(500, 'Đường dẫn chứng từ không hợp lệ.')
+    return RECEIPTS_DIR / key
+
+
+def receipt_json(item: Receipt) -> dict:
+    return {'id': item.id, 'entry_id': item.entry_id, 'name': item.original_name,
+            'mime_type': item.mime_type, 'size_bytes': item.size_bytes,
+            'sha256': item.sha256, 'created_at': item.created_at.isoformat()}
+
+
+def require_entry(db: Session, user_id: int, entry_id: int) -> Entry:
+    entry = db.scalar(select(Entry).where(Entry.id == entry_id, Entry.user_id == user_id))
+    if entry is None:
+        raise HTTPException(404, 'Không tìm thấy giao dịch.')
+    return entry
+
+
+def require_receipt(db: Session, user_id: int, receipt_id: int) -> Receipt:
+    receipt = db.scalar(select(Receipt).where(Receipt.id == receipt_id, Receipt.user_id == user_id))
+    if receipt is None:
+        raise HTTPException(404, 'Không tìm thấy chứng từ.')
+    return receipt
+
+
+@app.get('/api/receipts')
+def receipts_overview(month: str | None = None, q: str = '', kind: str = '',
+                      page: int = 1, size: int = 30,
+                      u: User = Depends(current), db: Session = Depends(get_db)):
+    """Owner-scoped searchable metadata; attachment bytes never appear in list responses."""
+    if page < 1 or not 1 <= size <= 100 or len(q) > 80:
+        raise HTTPException(422, 'Bộ lọc hoặc phân trang không hợp lệ.')
+    if kind not in ('', 'image', 'pdf'):
+        raise HTTPException(422, 'Loại chứng từ không hợp lệ.')
+    stmt = select(Receipt, Entry).join(Entry, Entry.id == Receipt.entry_id).where(
+        Receipt.user_id == u.id, Entry.user_id == u.id)
+    if month:
+        lower, upper = month_bounds(month)
+        stmt = stmt.where(Entry.occurred_on >= lower, Entry.occurred_on < upper)
+    if kind == 'pdf':
+        stmt = stmt.where(Receipt.mime_type == 'application/pdf')
+    elif kind == 'image':
+        stmt = stmt.where(Receipt.mime_type.like('image/%'))
+    if q.strip():
+        pattern = f'%{escape_like(q.strip())}%'
+        stmt = stmt.where(or_(Receipt.original_name.ilike(pattern, escape='\\'),
+                              Entry.title.ilike(pattern, escape='\\')))
+    # Explicit count on the subquery avoids extra results or unmatched join rows.
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.execute(stmt.order_by(Receipt.id.desc()).offset((page-1)*size).limit(size)).all()
+    return {'items': [{**receipt_json(receipt), 'entry_title': entry.title,
+                       'entry_kind': entry.kind, 'entry_amount': entry.amount,
+                       'occurred_on': entry.occurred_on.isoformat()}
+                      for receipt, entry in items],
+            'total': total, 'page': page, 'pages': max(1,(total+size-1)//size),
+            'max_files': MAX_RECEIPTS_PER_ENTRY, 'max_bytes': MAX_RECEIPT_BYTES}
+
+
+@app.get('/api/transactions/{entry_id}/receipts')
+def list_receipts(entry_id: int, u: User = Depends(current), db: Session = Depends(get_db)):
+    require_entry(db, u.id, entry_id)
+    items = db.scalars(select(Receipt).where(Receipt.entry_id == entry_id, Receipt.user_id == u.id)
+                       .order_by(Receipt.id.desc())).all()
+    return {'items': [receipt_json(x) for x in items], 'max_files': MAX_RECEIPTS_PER_ENTRY,
+            'max_bytes': MAX_RECEIPT_BYTES}
+
+
+@app.post('/api/transactions/{entry_id}/receipts')
+def add_receipt(entry_id: int, data: NewReceipt, u: User = Depends(current), db: Session = Depends(get_db)):
+    account_locked(db, u.id)
+    # Serialize concurrent uploads to one transaction on PostgreSQL to enforce the file-count limit.
+    entry = db.scalar(select(Entry).where(Entry.id == entry_id, Entry.user_id == u.id).with_for_update())
+    if entry is None: raise HTTPException(404, 'Không tìm thấy giao dịch.')
+    count = db.scalar(select(func.count()).select_from(Receipt).where(
+        Receipt.user_id == u.id, Receipt.entry_id == entry_id)) or 0
+    if count >= MAX_RECEIPTS_PER_ENTRY:
+        raise HTTPException(409, 'Mỗi giao dịch chỉ được đính kèm tối đa 8 chứng từ.')
+    name = data.name.replace('\\', '/').split('/')[-1].strip()
+    if not name or len(name) > 160 or any(ord(c) < 32 for c in name):
+        raise HTTPException(422, 'Tên tệp không hợp lệ.')
+    try:
+        content = base64.b64decode(data.data_base64, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(422, 'Nội dung chứng từ không hợp lệ.')
+    if not content or len(content) > MAX_RECEIPT_BYTES:
+        raise HTTPException(413, 'Tệp vượt quá 8 MB hoặc rỗng.')
+    mime = receipt_type(content)
+    if not mime or Path(name).suffix.lower() not in ({'.jpeg', '.jpg'} if mime == 'image/jpeg' else {RECEIPT_TYPES.get(mime)}):
+        raise HTTPException(415, 'Chỉ nhận JPG, PNG, WEBP hoặc PDF đúng định dạng.')
+    if mime.startswith('image/'):
+        try:
+            with Image.open(io.BytesIO(content)) as image:
+                if image.width * image.height > 20_000_000:
+                    raise HTTPException(413, 'Ảnh có kích thước điểm ảnh quá lớn.')
+                if image.format != {'image/jpeg':'JPEG','image/png':'PNG','image/webp':'WEBP'}[mime]:
+                    raise HTTPException(415, 'Định dạng ảnh không khớp nội dung.')
+                image.verify()
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(415, 'Ảnh không hợp lệ hoặc bị hỏng.')
+    storage_key = uuid.uuid4().hex + RECEIPT_TYPES[mime]
+    destination = receipt_path(storage_key)
+    try:
+        RECEIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(destination), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            with os.fdopen(fd, 'wb') as file:
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+        row = Receipt(user_id=u.id, entry_id=entry_id, original_name=name, mime_type=mime,
+                      size_bytes=len(content), sha256=hashlib.sha256(content).hexdigest(),
+                      storage_key=storage_key)
+        db.add(row)
+        db.flush()
+        log(db, u.id, 'receipt_added', f'entry={entry_id}, receipt={row.id}')
+        db.commit()
+        return receipt_json(row)
+    except Exception:
+        db.rollback()
+        destination.unlink(missing_ok=True)
+        raise
+
+
+@app.get('/api/receipts/{receipt_id}/file')
+def receipt_file(receipt_id: int, u: User = Depends(current), db: Session = Depends(get_db)):
+    row = require_receipt(db, u.id, receipt_id)
+    destination = receipt_path(row.storage_key)
+    if not destination.is_file():
+        raise HTTPException(404, 'Tệp chứng từ không còn trên ổ đĩa.')
+    if destination.stat().st_size != row.size_bytes or hashlib.sha256(destination.read_bytes()).hexdigest() != row.sha256:
+        raise HTTPException(409, 'Chứng từ bị thay đổi hoặc hỏng; không thể tải tệp.')
+    return FileResponse(destination, media_type=row.mime_type, filename=row.original_name,
+                        content_disposition_type='attachment', headers={
+                            'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+
+
+@app.delete('/api/receipts/{receipt_id}')
+def delete_receipt(receipt_id: int, u: User = Depends(current), db: Session = Depends(get_db)):
+    account_locked(db, u.id)
+    row = require_receipt(db, u.id, receipt_id)
+    destination = receipt_path(row.storage_key)
+    db.delete(row)
+    log(db, u.id, 'receipt_deleted', f'entry={row.entry_id}, receipt={row.id}')
+    db.commit()
+    destination.unlink(missing_ok=True)
+    return {'ok': True}
+
+
 @app.get('/api/transactions')
 def transactions(month:str|None=None,kind:str|None=None,category_id:int|None=None,wallet_id:int|None=None,q:str='',page:int=1,size:int=15,u:User=Depends(current),db:Session=Depends(get_db)):
     if page<1 or size<1 or size>100:raise HTTPException(422,'Phân trang không hợp lệ.')
@@ -2151,7 +2343,11 @@ def transactions(month:str|None=None,kind:str|None=None,category_id:int|None=Non
     cats={c.id:c for c in db.scalars(select(Category).where(Category.user_id==u.id))}
     ids=[e.id for e in entries]
     allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
-    return {'items':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in entries],'total':total,'page':page,'pages':max(1,(total+size-1)//size)}
+    counts = dict(db.execute(select(Receipt.entry_id, func.count(Receipt.id))
+              .where(Receipt.user_id == u.id, Receipt.entry_id.in_(ids))
+              .group_by(Receipt.entry_id)).all()) if ids else {}
+    return {'items':[{**entry_json(e,cats,int(allocations.get(e.id,0))), 'receipt_count':int(counts.get(e.id, 0))}
+                     for e in entries], 'total':total,'page':page,'pages':max(1,(total+size-1)//size)}
 
 
 def escape_like(q):
@@ -2203,8 +2399,14 @@ def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)
     reverse_entry_payments(db,u.id,e.id)
     for run in db.scalars(select(RecurringRun).where(RecurringRun.user_id==u.id,RecurringRun.entry_id==e.id)):
         run.entry_id=None;run.status='deleted'
+    receipt_files = [receipt_path(r.storage_key) for r in db.scalars(select(Receipt).where(
+        Receipt.user_id == u.id, Receipt.entry_id == e.id)).all()]
+    db.query(Receipt).filter(Receipt.user_id == u.id, Receipt.entry_id == e.id).delete(synchronize_session=False)
     db.flush();db.delete(e);db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'entry_deleted',f'#{entry_id}');db.commit();return {'ok':True}
+    log(db,u.id,'entry_deleted',f'#{entry_id}');db.commit()
+    for path in receipt_files:
+        path.unlink(missing_ok=True)
+    return {'ok':True}
 
 
 @app.put('/api/opening-balance')
@@ -2684,6 +2886,9 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
     db.query(StashMovement).filter(StashMovement.user_id==target.id).delete(synchronize_session=False)
     db.query(StashFund).filter(StashFund.user_id==target.id).delete(synchronize_session=False)
+    receipt_files = [receipt_path(r.storage_key) for r in db.scalars(
+        select(Receipt).where(Receipt.user_id == target.id)).all()]
+    db.query(Receipt).filter(Receipt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
     db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsMovement).filter(SavingsMovement.user_id==target.id).delete(synchronize_session=False)
@@ -2695,6 +2900,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.delete(target)
     log(db,u.id,'user_deleted',username)
     db.commit()
+    for path in receipt_files:
+        path.unlink(missing_ok=True)
     return {'ok':True}
 
 

@@ -26,6 +26,7 @@ services:
       DATABASE_URL: postgresql+psycopg://moneyflow:${DB_PASSWORD}@db:5432/moneyflow
       COOKIE_SECURE: "true"
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      RECEIPTS_DIR: /opt/moneyflow/receipts
       APP_BASE_URL: https://127.0.0.1:8765
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -34,6 +35,8 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - moneyflow_receipts:/opt/moneyflow/receipts
     expose:
       - "8000"
     depends_on:
@@ -58,5 +61,6 @@ networks:
     driver: bridge
 volumes:
   moneyflow_db:
+  moneyflow_receipts:
   caddy_data:
   caddy_config:

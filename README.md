@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.21
+# MoneyFlow Local v1.0.22
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -13,6 +13,7 @@
 | HTTP chuyển hướng | `http://127.0.0.1:8764` |
 | pgAdmin kết nối PostgreSQL | `127.0.0.1:5435`, DB/user `moneyflow` |
 | PostgreSQL nội bộ Docker | `db:5432` |
+| Lưu tệp hóa đơn/chứng từ | Docker volume `moneyflow-local_moneyflow_receipts` (riêng với PostgreSQL) |
 | Source trên GitHub | `TamNhien/moneyflow` (repository private) |
 
 > Cổng `8765` chỉ dùng HTTPS; `http://127.0.0.1:8765` không hoạt động. `D:\DockerData` là **thư mục dữ liệu**, không nhất thiết là vị trí cài `Docker Desktop.exe`.
@@ -160,7 +161,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.21
+.\scripts\publish.ps1 -Version 1.0.22
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -261,6 +262,7 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | **v1.0.18** | **Dự báo dòng tiền 30/60/90 ngày từ lịch định kỳ, phân bổ trả nợ gốc theo thu nhập, phát hiện nguy cơ âm từng ví và cảnh báo kỳ quá hạn, API chỉ đọc không thay số dư.** |
 | **v1.0.19** | **Tiền tích để dành (quỹ tích lũy linh hoạt): tạo nhiều quỹ không bắt buộc mục tiêu/hạn mức, góp từ ví hoặc rút về ví, sổ góp/rút bất biến, kiểm tra số dư từng ví và phân quyền. Số dư khả dụng trừ khoản để dành, tài sản ròng cộng lại khoản này; báo cáo Excel/PDF tách riêng tích lũy và mục tiêu tiết kiệm.** |
 | **v1.0.20** | **Tích để dành tự động: mỗi quỹ có thể trích 1–100% của thu nhập sau trả nợ, hoặc số tiền cố định. Chọn ví áp dụng; ghi bút toán tự động có liên kết giao dịch gốc, hoàn tác an toàn khi sửa/xóa thu nhập, dự báo số dư sau khi dành riêng tiền. Kiểm tra migration v1.0.19 và chống nhân đôi.** |
+| **v1.0.22** | **Quản lý hóa đơn & chứng từ: đính kèm tối đa 8 ảnh/PDF (≤8 MB/tệp) vào mỗi giao dịch, xem trước ảnh, tải/xóa, trang tra cứu lọc theo định dạng/tháng, phân quyền theo chủ giao dịch, lưu nội dung tệp ở Docker volume riêng, kiểm tra SHA-256 và tự xóa tệp khi xóa giao dịch hoặc người dùng.** |
 | **v1.0.21** | **Ngân sách thông minh: cảnh báo mốc 70%, 90%, 100% cho từng danh mục; dự báo mức chi cuối tháng từ tốc độ chi và lịch chi còn lại, tránh cộng trùng; gợi ý hạn mức chi/ngày, cảnh báo ngay tại Dashboard; API chỉ đọc, không migration database.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.
@@ -282,6 +284,18 @@ Mở **Tiền tích để dành** trên menu. Tạo quỹ linh hoạt (ví dụ 
 - Tài khoản và số dư hiện tại vẫn nằm trong PostgreSQL Docker cũ; không xóa volume. Trên Windows, dùng `scripts/run.ps1` để tự mở Docker Desktop → test/build/chạy; `scripts/publish.ps1 -Version 1.0.21` để phát hành và xác minh GitHub Release.
 
 
+
+## v1.0.22 — Quản lý hóa đơn & chứng từ
+
+- Trong **Giao dịch**, nhấn **Chứng từ** tại một giao dịch đã ghi. Chọn ảnh hóa đơn/biên lai (JPG, JPEG, PNG, WEBP) hoặc PDF để đính kèm. Có thể mở **Hóa đơn & chứng từ** trong menu để tra cứu, lọc theo loại tệp, theo tháng của giao dịch hoặc tên tệp/nội dung giao dịch; có phân trang 30 tệp mỗi lần.
+- **Tệp được lưu riêng tư**: PostgreSQL chứa bảng `receipts` với người dùng, giao dịch, tên gốc, định dạng đã xác thực, dung lượng, SHA-256, ngày tạo và khóa lưu trữ ngẫu nhiên. Nội dung tệp được lưu tại `/opt/moneyflow/receipts` trong Docker volume **`moneyflow_receipts`** của dự án (tên thực tế theo Docker Compose thường là `moneyflow-local_moneyflow_receipts`). Đây là volume độc lập với source ZIP và dữ liệu PostgreSQL, tồn tại qua việc build lại ứng dụng hoặc tạo lại container thông thường.
+- **Bảo mật**: chỉ tài khoản sở hữu giao dịch được liệt kê, tải hoặc xóa tệp tương ứng; bảo vệ bằng phiên đăng nhập + CSRF cho thao tác ghi. Giới hạn **8 tệp/giao dịch**, **8 MiB/tệp**; kiểm tra phần mở rộng, chữ ký tệp, đọc xác minh ảnh bằng Pillow; từ chối các tệp khác định dạng, tệp hỏng và HTML/SVG/executable. Tệp PDF được tải về theo dạng attachment; chỉ ảnh mới có nút **Xem** trong ứng dụng.
+- **Tính toàn vẹn**: mã SHA-256 được lưu khi đính kèm và kiểm tra trước khi tải. Nếu tệp bị sửa/hỏng trên ổ đĩa, API từ chối tải thay vì gửi nội dung giả. Không lưu đường dẫn hoặc tên do người dùng chọn làm đường dẫn thật; ứng dụng dùng khóa ngẫu nhiên riêng.
+- **Vòng đời**: sửa nội dung/số tiền giao dịch không làm mất chứng từ; xóa giao dịch sẽ xóa các tệp của giao dịch. Xóa tài khoản theo quyền Admin cũng xóa các chứng từ của tài khoản đó. Xóa riêng một chứng từ không làm thay đổi số dư hay lịch sử tiền; đính kèm cũng không tạo bút toán thu/chi.
+- **Phạm vi**: hoạt động local, không đọc OCR hoặc tự nhập số tiền từ hóa đơn; chưa có tích hợp ngân hàng hoặc quét mã QR thanh toán. Cơ chế kiểm tra loại file không thay thế phần mềm chống virus của Windows; chỉ mở những tệp từ nguồn bạn tin cậy.
+- **Database**: tạo mới bảng `receipts` bằng SQLAlchemy `create_all` khi ứng dụng khởi động; không sửa cấu trúc bảng giao dịch cũ, không cần tạo lại database. Quyền ghi thư mục tệp thuộc tài khoản ứng dụng không đặc quyền trong Docker. Các tệp đính kèm không được đóng gói vào Full Source ZIP hoặc tải lên GitHub.
+- **Kiểm thử**: thêm bài kiểm tra quyền truy cập, chống giả định dạng, giới hạn dung lượng/số tệp, kiểm tra SHA-256, xóa tệp khi xóa giao dịch/người dùng và API tra cứu. Frontend smoke test mở trang Kho chứng từ và biểu mẫu đính kèm.
+
 ## v1.0.21 — Ngân sách thông minh
 
 - **Ngân sách** hiển thị ngưỡng sử dụng **70% (cảnh báo), 90% (nguy cơ cao), 100% (chạm hạn mức)** và **vượt hạn mức** theo từng danh mục. Dashboard hiển thị cảnh báo nổi bật và nút mở trang ngân sách.
@@ -289,4 +303,4 @@ Mở **Tiền tích để dành** trên menu. Tạo quỹ linh hoạt (ví dụ 
 - Hiển thị **mức có thể chi/ngày còn lại** = max(0, (hạn mức - tiền đã ghi - kỳ chi định kỳ còn lại) / số ngày còn lại), làm tròn xuống. Nếu cần tăng ngân sách, điều chỉnh thủ công ở nút **Chỉnh sửa**.
 - Với tháng quá khứ hoặc tương lai, chỉ xem số tiền đã ghi, **không dự báo**; tháng hiện tại hiển thị nhãn rõ là **ước tính**. Quỹ để dành và nợ không bị thay đổi. Lịch đã ghi hoặc bỏ qua được loại trừ khi dự báo khoản chi định kỳ còn lại.
 - Endpoint **GET `/api/budgets/insights?month=YYYY-MM`** được bảo vệ bởi phiên đăng nhập và có `Cache-Control: no-store`; không ghi dữ liệu. Cấu trúc bảng PostgreSQL giữ nguyên, không tạo migration mới.
-- Lệnh phát hành: `scripts/publish.ps1 -Version 1.0.21`. Kết quả thực tế trên Windows cần được xác minh bằng `scripts/run.ps1` trước khi công bố GitHub Release.
+- Lệnh phát hành lịch sử: `scripts/publish.ps1 -Version 1.0.21`. Kết quả thực tế trên Windows cần được xác minh bằng `scripts/run.ps1` trước khi công bố GitHub Release.
