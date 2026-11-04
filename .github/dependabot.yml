@@ -1,0 +1,42 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: daily
+      time: "08:00"
+      timezone: Asia/Ho_Chi_Minh
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "deps(python)"
+    groups:
+      python-compatible:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Ho_Chi_Minh
+    labels:
+      - dependencies
+    ignore:
+      - dependency-name: "postgres"
+        update-types:
+          - version-update:semver-major
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Ho_Chi_Minh
+    labels:
+      - dependencies

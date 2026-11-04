@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.23
+# MoneyFlow Local v1.0.24
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -66,6 +66,36 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.24 - Thống kê theo năm và tự động kiểm soát phiên bản thư viện
+
+**Thong ke theo nam**
+
+- Menu **Thống kê theo năm**: xem thu nhap, chi tieu, no da tra, tien thu hoi no, dong tien thuan cua tung thang va ca nam, cung bieu do gia tri tai san rong cuoi thang.
+- Co the chon nam tu 2000 den nam hien tai, so sanh thu/chi voi nam truoc; xuat bao cao nam qua **Excel (.xlsx)** va **PDF (.pdf)**. Xuat bao cao yeu cau dang nhap; khong ghi them giao dich hoac sua so du.
+- Tien chuyen giua cac vi khong bi tinh thanh thu/chi, tien chuyen vao quy tich luy van tinh la tai san. Tien tra no va thu hoi no duoc tinh rieng, khong tinh trung thu/chi.
+- **Gioi han quan trong**: so du va tai san rong trong lich su la **uoc tinh tai lap tu so giao dich dang co**, khong phai snapshot da khoa so. Neu nguoi dung sua/xoa/ghi lui ngay giao dich, sua so tien dau ky, thay doi no, hoac tao vi sau khi da co giao dich cu, bang tai san cuoi thang co the duoc tinh lai. Vi tao khi migrate se gia dinh so dau ky co tu ngay phat sinh giao dich som nhat cua vi. Viec nhap no khong tu tang tien mat neu khong co giao dich thu nhap.
+- Endpoint: `GET /api/reports/annual?year=2026`, `GET /api/reports/annual.xlsx?year=2026`, `GET /api/reports/annual.pdf?year=2026`. Khong thay doi schema PostgreSQL.
+
+**Tu dong cap nhat package / framework**
+
+- `.github/dependabot.yml`: GitHub Dependabot kiem tra **Python packages hang ngay luc 08:00 (Asia/Ho_Chi_Minh)**; Docker image va GitHub Actions moi thu Hai. Cac phien ban moi duoc de xuat qua **Pull Request** tren repository private `TamNhien/moneyflow`.
+- `backend/requirements.txt` duoc **ghim phien ban khoi tao da biet** thay vi khoang phien ban troi: moi lan build lai co the tai lap bo dependency on dinh. Dependabot tao PR cho phien ban moi nhat, ke ca ban major; **khong dong nghia v1.0.24 da su dung moi package moi nhat**.
+- GitHub Actions `MoneyFlow CI` kiem tra frontend, backend, Docker build truoc. `.github/workflows/dependency-auto-merge.yml` chi tu dong gop PR cua `dependabot[bot]` neu CI tren **dung commit** thanh cong, patch chi sua `backend/requirements.txt`, cac pin chi tang **trong cung major** (voi 0.x thi cung minor), va repository cho phep token ghi. Moi truong CI khong su dung ket noi PostgreSQL thuc te, vi vay chay tren Docker/PostgreSQL Windows van can kiem chung.
+- Ban cap nhat **major** (Python framework 0.x doi minor, ReportLab 4 -> 5, Pillow 12 -> 13, PostgreSQL 18 -> 19...), Docker base image va GitHub Actions can kiem tra PR thu cong. **Khong tu dong thay the PostgreSQL volume hoac upgrade major DB**. Anh Docker va GitHub Actions duoc theo doi qua PR, khong auto-merge.
+- Truoc khi muon auto-merge, trong GitHub **Settings -> Actions -> General -> Workflow permissions**, cho phep `Read and write permissions` va `Allow GitHub Actions to create and approve pull requests` neu can; neu bi gioi han boi to chuc thi PR chi o trang thai cho xem xet. Nen bat **required status check** `MoneyFlow CI / test-and-build` tren nhanh chinh. Khong can cung cap access token/mat khau trong source.
+- Repo tai may Windows khong tu dong ghi de khi GitHub thay doi; muon nhan dependency da duoc gop va build thi dong bo Git theo quy trinh Git thong thuong. Khong nen tu dong `git pull --force` hay thay doi bo source dang co sua doi.
+
+**Lenh thu nghiem va phat hanh** (mac dinh tren Windows):
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\run.ps1
+.\scripts\publish.ps1 -Version 1.0.24
+```
+
+Giu mot `README.md` duy nhat, khong them huong dan Patch hay sao luu vao quy trinh mac dinh.
 
 ## v1.0.23 — Đối soát số dư và cảnh báo giao dịch cần xem lại
 

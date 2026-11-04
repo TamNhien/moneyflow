@@ -254,3 +254,195 @@ def pdf_bytes(data):
         canvas.drawRightString(A4[0]-18*mm,11*mm,f'Trang {doc.page}')
     doc.build(story,onFirstPage=footer,onLaterPages=footer)
     return out.getvalue()
+
+
+# v1.0.24: annual financial timeline based on the CURRENT editable ledger.
+# Entries can be backdated or edited, so past month-end amounts are reconstructed
+# estimates, not immutable audited snapshots.
+def annual_finances(db, user_id: int, year: int):
+    from calendar import monthrange
+    from backend.app import (Entry, Debt, DebtPayment, Wallet, SavingsMovement,
+                             StashMovement)
+    today = date.today()
+    if year < 2000 or year > today.year:
+        raise HTTPException(422, 'Nam bao cao phai tu 2000 den nam hien tai.')
+    first = date(year, 1, 1)
+    cutoff = min(date(year, 12, 31), today)
+    all_entries = list(db.scalars(select(Entry).where(Entry.user_id == user_id, Entry.occurred_on <= cutoff)))
+    all_payments = list(db.execute(select(DebtPayment, Debt).join(Debt, DebtPayment.debt_id == Debt.id)
+                  .where(DebtPayment.user_id == user_id, Debt.user_id == user_id,
+                         DebtPayment.paid_on <= cutoff)))
+    all_savings = list(db.scalars(select(SavingsMovement).where(
+        SavingsMovement.user_id == user_id, SavingsMovement.occurred_on <= cutoff)))
+    all_stash = list(db.scalars(select(StashMovement).where(
+        StashMovement.user_id == user_id, StashMovement.occurred_on <= cutoff)))
+    wallets = list(db.scalars(select(Wallet).where(Wallet.user_id == user_id)))
+    debts = list(db.scalars(select(Debt).where(Debt.user_id == user_id)))
+    # When an older account was migrated to wallets after its transactions,
+    # wallet.created_at is not a trustworthy opening-balance start date.
+    # Assume the opening balance existed from its earliest dated wallet entry.
+    # This is an estimate and is explicitly disclosed to the user.
+    wallet_first_activity={}
+    for item in all_entries:
+        if item.wallet_id is not None:
+            old=wallet_first_activity.get(item.wallet_id)
+            if old is None or item.occurred_on < old:
+                wallet_first_activity[item.wallet_id]=item.occurred_on
+    for item in all_savings + all_stash:
+        old=wallet_first_activity.get(item.wallet_id)
+        if old is None or item.occurred_on < old:
+            wallet_first_activity[item.wallet_id]=item.occurred_on
+    monthly = []
+    def day_of(obj):
+        d = obj.created_at
+        return d.date() if hasattr(d, 'date') else d
+    for m in range(1, 13):
+        start_month = date(year, m, 1)
+        if start_month > today:
+            break
+        last = min(date(year, m, monthrange(year,m)[1]), today)
+        income=expense=payable_paid=receivable_collected=0
+        all_income=all_expense=0
+        for e in all_entries:
+            if e.occurred_on <= last:
+                amt = int(e.amount)
+                if e.kind == 'income':
+                    all_income += amt
+                    if e.occurred_on >= first and e.occurred_on.month == m: income += amt
+                else:
+                    all_expense += amt
+                    if e.occurred_on >= first and e.occurred_on.month == m: expense += amt
+        debt_payable_cash=debt_receivable_cash=0
+        paid_by_debt={}
+        for payment,debt in all_payments:
+            if payment.paid_on > last: continue
+            amount=int(payment.amount)
+            cash=amount+int(payment.interest_amount or 0)
+            paid_by_debt[debt.id]=paid_by_debt.get(debt.id,0)+amount
+            if debt.direction=='payable':
+                debt_payable_cash += cash
+                if payment.paid_on >= first and payment.paid_on.month == m: payable_paid+=cash
+            else:
+                debt_receivable_cash += cash
+                if payment.paid_on >= first and payment.paid_on.month == m: receivable_collected+=cash
+        reserved_goals=sum((1 if move.kind=='deposit' else -1)*int(move.amount)
+                           for move in all_savings if move.occurred_on<=last)
+        reserved_stash=sum((1 if move.kind=='deposit' else -1)*int(move.amount)
+                           for move in all_stash if move.occurred_on<=last)
+        # Wallet creation dates predate ledger migration only when originally recorded;
+        # historical opening balances can be amended, hence estimate disclaimer.
+        opening=sum(int(w.opening_balance) for w in wallets
+                    if min(day_of(w),wallet_first_activity.get(w.id,day_of(w)))<=last)
+        available=(opening + all_income - all_expense - debt_payable_cash
+                   + debt_receivable_cash - reserved_goals - reserved_stash)
+        payable=receivable=0
+        for debt in debts:
+            if day_of(debt)>last: continue
+            remaining=max(0, int(debt.principal)-paid_by_debt.get(debt.id,0))
+            if debt.direction=='payable':payable+=remaining
+            else:receivable+=remaining
+        saved=reserved_goals+reserved_stash
+        monthly.append({'month':f'{year}-{m:02d}', 'income':income,'expense':expense,
+                'debt_paid':payable_paid,'debt_collected':receivable_collected,
+                'net_cash':income-expense-payable_paid+receivable_collected,
+                'available':available,'reserved':saved,'assets':available+saved,
+                'payable':payable,'receivable':receivable,
+                'net_worth':available+saved+receivable-payable})
+    fields=('income','expense','debt_paid','debt_collected','net_cash')
+    totals={key:sum(int(x[key]) for x in monthly) for key in fields}
+    # Previous year: compute only activity in that year. This avoids using previous
+    # results as a fake past balance snapshot.
+    prev_start=date(year-1,1,1)
+    prev_end=date(year,1,1)
+    prev_income=sum(int(e.amount) for e in db.scalars(select(Entry).where(
+        Entry.user_id==user_id,Entry.kind=='income',Entry.occurred_on>=prev_start,Entry.occurred_on<prev_end)))
+    prev_expense=sum(int(e.amount) for e in db.scalars(select(Entry).where(
+        Entry.user_id==user_id,Entry.kind=='expense',Entry.occurred_on>=prev_start,Entry.occurred_on<prev_end)))
+    previous={'income':prev_income,'expense':prev_expense}
+    previous['net_basic']=prev_income-prev_expense
+    comparison={k:{'current':totals[k],'previous':previous[k],
+        'difference':totals[k]-previous[k],
+        'percentage':round((totals[k]-previous[k])*100/abs(previous[k]),1)
+                     if previous[k] else None} for k in ('income','expense')}
+    return {'year':year,'as_of':cutoff.isoformat(),'monthly':monthly,'totals':totals,
+            'previous_year':year-1,'comparison':comparison,
+            'closing': monthly[-1] if monthly else None,
+            'disclaimer':'Du lieu tai san cuoi thang duoc uoc tinh tu so goc va so giao dich hien co; '
+                         'gia dinh so dau ky da co tu lan hoat dong dau tien; '
+                         'giao dich sua/xoa/ghi lui ngay va thay doi so goc co the lam doi so lieu lich su. '
+                         'Khong phai anh chup so du tai thoi diem da khoa so.'}
+
+
+def annual_excel_bytes(data):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    wb=Workbook();ws=wb.active;ws.title='Tong quan nam'
+    ws.append(['MoneyFlow', 'Bao cao tai chinh '+str(data['year'])])
+    ws.append(['Ngay chot',data['as_of']])
+    for k,label in [('income','Tong thu nhap'),('expense','Tong chi tieu'),
+                    ('debt_paid','Tra no'),('debt_collected','Thu hoi no'),
+                    ('net_cash','Dong tien thuan')]: ws.append([label,data['totals'][k]])
+    ws.append(['Ghi chu',data['disclaimer']])
+    ws.column_dimensions['A'].width=34;ws.column_dimensions['B'].width=105
+    for cell in ws[1]: cell.font=Font(bold=True,color='FFFFFF');cell.fill=PatternFill('solid',fgColor='202A49')
+    w=wb.create_sheet('Bien dong 12 thang');w.freeze_panes='B2'
+    w.append(['Thang','Thu nhap','Chi tieu','Tra no','Thu hoi no','Tien thuan',
+              'So du kha dung (uoc tinh)','Tien danh rieng (uoc tinh)',
+              'Tai san tien (uoc tinh)','No phai thu','No phai tra','Tai san rong (uoc tinh)'])
+    keys=['month','income','expense','debt_paid','debt_collected','net_cash',
+          'available','reserved','assets','receivable','payable','net_worth']
+    for row in data['monthly']:w.append([row[k] for k in keys])
+    w.auto_filter.ref=w.dimensions
+    for col in w[1]: col.font=Font(bold=True,color='FFFFFF');col.fill=PatternFill('solid',fgColor='202A49');col.alignment=Alignment(wrap_text=True)
+    w.row_dimensions[1].height=34
+    for j in range(1,len(keys)+1):w.column_dimensions[get_column_letter(j)].width=18 if j==1 else 25
+    for row in w.iter_rows(min_row=2,min_col=2):
+        for c in row:c.number_format='#,##0" d";[Red](#,##0" d");-'
+    w.sheet_view.showGridLines=False
+    from io import BytesIO
+    output=BytesIO();wb.save(output);return output.getvalue()
+
+
+def annual_pdf_bytes(data):
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    root=Path('/usr/share/fonts/truetype/dejavu')
+    # Local test fallback: the Debian image provides the same font path.
+    if not (root/'DejaVuSans.ttf').exists():
+        root=Path('/usr/share/fonts/truetype/dejavu')
+    if 'MFAnnual' not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont('MFAnnual',str(root/'DejaVuSans.ttf')))
+        pdfmetrics.registerFont(TTFont('MFAnnualBold',str(root/'DejaVuSans-Bold.ttf')))
+    out=BytesIO()
+    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=14*mm,rightMargin=14*mm,
+                          topMargin=15*mm,bottomMargin=15*mm,
+                          title=f'MoneyFlow - Bao cao nam {data["year"]}')
+    style=ParagraphStyle('mfy',fontName='MFAnnual',fontSize=8,leading=12)
+    hd=ParagraphStyle('mfyh',parent=style,fontName='MFAnnualBold',fontSize=16,leading=24,spaceAfter=12)
+    story=[Paragraph('MONEYFLOW  |  BÁO CÁO TÀI CHÍNH NĂM '+str(data['year']),hd),
+           Paragraph('Tổng hợp dòng tiền và lịch sử tài sản (ước tính)',style),Spacer(1,8*mm)]
+    def tb(rows,widths,header=False):
+        t=Table(rows,colWidths=widths,repeatRows=1 if header else 0)
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#232D50')),
+          ('TEXTCOLOR',(0,0),(-1,0),colors.white),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F2F4FA')]),
+          ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),7),('BOTTOMPADDING',(0,0),(-1,-1),7)]))
+        return t
+    head_style=ParagraphStyle('mfyhead',parent=style,textColor=colors.white,fontName='MFAnnualBold')
+    def P(s):return Paragraph(str(s),style)
+    def H(s):return Paragraph(str(s),head_style)
+    story.append(tb([[H('Chỉ tiêu'),H('Giá trị')]]+[[P(label),P(currency(data['totals'][key]))] for key,label in
+          [('income','Thu nhập'),('expense','Chi tiêu'),('debt_paid','Trả nợ'),('debt_collected','Thu hồi nợ'),('net_cash','Dòng tiền thuần')]], [93*mm,89*mm],True))
+    story.extend([Spacer(1,8*mm),P('TÀI SẢN RÒNG THEO THÁNG (ƯỚC TÍNH)'),Spacer(1,3*mm)])
+    rows=[[H('Tháng'),H('Thu'),H('Chi'),H('Tiền thuần'),H('Tài sản ròng')]]
+    for r in data['monthly']:
+        rows.append([P(r['month']),P(currency(r['income'])),P(currency(r['expense'])),P(currency(r['net_cash'])),P(currency(r['net_worth']))])
+    story.append(tb(rows,[23*mm,36*mm,36*mm,42*mm,45*mm],True))
+    story.extend([Spacer(1,6*mm),P('Lưu ý: Lịch sử được tái lập từ sổ giao dịch hiện có; không phải số dư đã khóa sổ.')])
+    doc.build(story)
+    return out.getvalue()

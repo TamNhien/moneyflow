@@ -1417,3 +1417,45 @@ def test_reconciliation_latest_wallet_check_survives_history_limit(client):
         quiet_row=next(row for row in report['wallets'] if row['id']==quiet.id)
         assert quiet_row['last_check']['difference']==1000
         assert len(report['checks'])==60
+
+
+# v1.0.24: annual report is read-only and supports year-specific exports.
+def test_annual_finances_and_exports_no_side_effects(client):
+    from io import BytesIO
+    from openpyxl import load_workbook
+    with TestClient(app) as c:
+        res=auth_post(c, '/api/login', {'username':'recon23a','password':'SecurePassword@12345'})
+        assert res.status_code==200,res.text
+        before=c.get('/api/dashboard?month=2026-11').json()
+        result=c.get('/api/reports/annual?year=2026')
+        assert result.status_code==200,result.text
+        obj=result.json()
+        assert obj['year']==2026 and obj['monthly']
+        assert len(obj['monthly'])==11
+        assert obj['monthly'][-1]['month']=='2026-11'
+        assert obj['totals']['income']==sum(m['income'] for m in obj['monthly'])
+        assert obj['totals']['expense']==sum(m['expense'] for m in obj['monthly'])
+        assert obj['totals']['net_cash']==obj['totals']['income']-obj['totals']['expense']-obj['totals']['debt_paid']+obj['totals']['debt_collected']
+        assert obj['closing']['net_worth']==obj['closing']['assets']+obj['closing']['receivable']-obj['closing']['payable']
+        assert obj['closing']['net_worth']==before['net_worth']
+        assert 'no-store' in result.headers['cache-control']
+        excel=c.get('/api/reports/annual.xlsx?year=2026')
+        assert excel.status_code==200 and excel.content[:2]==b'PK'
+        w=load_workbook(BytesIO(excel.content),read_only=True,data_only=False)
+        assert w.sheetnames==['Tong quan nam','Bien dong 12 thang']
+        assert w.worksheets[1].max_row==12
+        w.close()
+        pdf=c.get('/api/reports/annual.pdf?year=2026')
+        assert pdf.status_code==200 and pdf.content.startswith(b'%PDF')
+        assert c.get('/api/reports/annual?year=2027').status_code==422
+        assert c.get('/api/reports/annual?year=1999').status_code==422
+        after=c.get('/api/dashboard?month=2026-11').json()
+        assert (before['balance'],before['net_worth'])==(after['balance'],after['net_worth'])
+    with TestClient(app) as anonymous:
+        assert anonymous.get('/api/reports/annual?year=2026').status_code==401
+        assert anonymous.get('/api/reports/annual.pdf?year=2026').status_code==401
+    with TestClient(app) as other:
+        r=auth_post(other,'/api/login',{'username':'recon23b','password':'SecurePassword@12345'})
+        assert r.status_code==200
+        other_data=other.get('/api/reports/annual?year=2026').json()
+        assert other_data['totals']['income']!=obj['totals']['income']

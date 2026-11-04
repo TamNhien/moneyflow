@@ -2898,6 +2898,32 @@ def cash_forecast(response: Response, days: int = 30,
     return compute_cash_forecast(db,u.id,days)
 
 
+@app.get('/api/reports/annual')
+def reports_annual(year: int, response: Response,
+                   u: User = Depends(current), db: Session = Depends(get_db)):
+    from backend.reporting import annual_finances
+    response.headers['Cache-Control']='no-store'
+    return annual_finances(db,u.id,year)
+
+
+@app.get('/api/reports/annual.xlsx')
+def reports_annual_excel(year: int, u: User = Depends(current), db: Session = Depends(get_db)):
+    from backend.reporting import annual_finances, annual_excel_bytes
+    return Response(content=annual_excel_bytes(annual_finances(db,u.id,year)),
+          media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          headers={'Content-Disposition':f'attachment; filename="moneyflow-annual-{year}.xlsx"',
+                   'Cache-Control':'no-store'})
+
+
+@app.get('/api/reports/annual.pdf')
+def reports_annual_pdf(year: int, u: User = Depends(current), db: Session = Depends(get_db)):
+    from backend.reporting import annual_finances, annual_pdf_bytes
+    return Response(content=annual_pdf_bytes(annual_finances(db,u.id,year)),
+          media_type='application/pdf',
+          headers={'Content-Disposition':f'attachment; filename="moneyflow-annual-{year}.pdf"',
+                   'Cache-Control':'no-store'})
+
+
 @app.get('/api/reports')
 def reports(end: str, response: Response, months: int = 12, u: User = Depends(current), db: Session = Depends(get_db)):
     from backend.reporting import build_report, as_public_report
