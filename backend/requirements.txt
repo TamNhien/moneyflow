@@ -6,7 +6,7 @@ sqlalchemy==2.0.50
 psycopg[binary]==3.3.7
 argon2-cffi==25.1.0
 openpyxl==3.1.5
-reportlab==4.4.9
+reportlab==5.1.0
 cryptography==46.0.4
 qrcode[pil]==8.2
 pillow==12.3.0
