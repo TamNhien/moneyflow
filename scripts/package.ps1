@@ -1,5 +1,5 @@
 ﻿#Requires -Version 5.1
-param([string] $Version = '1.0.20')
+param([string] $Version = '1.0.21')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^v?\d+\.\d+\.\d+$') { throw 'Version format: 1.0.4 or v1.0.4' }
 $Version = $Version.TrimStart('v')

@@ -1068,3 +1068,106 @@ def test_auto_stash_recurring_income_and_forecast(client):
     assert forecast.status_code==200,forecast.text
     assert forecast.json()['stash_allocated']>=0
     assert client.get('/api/transactions').json()['total']==before
+
+
+def test_smart_budget_thresholds_forecast_and_isolation(client):
+    """v1.0.21: 70/90/100 thresholds, safe projections and read-only isolation."""
+    from datetime import date, timedelta
+    from backend.app import SessionLocal, compute_budget_insights
+    today_day=date.today()
+    month=today_day.strftime('%Y-%m')
+    admin_login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert admin_login.status_code==200,admin_login.text
+    created=auth_post(client,'/api/users',credentials('smartbudget21'),csrf=admin_login.json()['csrf_token'])
+    assert created.status_code==200,created.text
+    login=auth_post(client,'/api/login',{'username':'smartbudget21','password':'SecurePassword@12345'})
+    assert login.status_code==200,login.text
+    csrf=login.json()['csrf_token']
+    category=next(c for c in client.get('/api/categories').json() if c['kind']=='expense')
+    wallet=client.get('/api/wallets').json()['items'][0]['id']
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':5000},method='put',csrf=csrf).status_code==200
+    assert auth_post(client,'/api/budgets',{'month':month,'category_id':category['id'],'amount':1000},method='put',csrf=csrf).status_code==200
+    def spend(n):
+        r=auth_post(client,'/api/transactions',{'title':f'Chi {n}','kind':'expense',
+                     'amount':n,'category_id':category['id'],'wallet_id':wallet,
+                     'occurred_on':today_day.isoformat()},csrf=csrf)
+        assert r.status_code==200,r.text
+    response=client.get(f'/api/budgets/insights?month={month}')
+    assert response.status_code==200,response.text
+    assert response.headers['cache-control']=='no-store'
+    assert response.json()['items'][0]['status']=='ok'
+    spend(700)
+    one=client.get(f'/api/budgets/insights?month={month}').json()['items'][0]
+    assert one['status']=='warning' and one['spent_percent']==70.0
+    assert one['projected_spent']>=one['spent']
+    assert one['remaining']==300
+    spend(200)
+    assert client.get(f'/api/budgets/insights?month={month}').json()['items'][0]['status']=='critical'
+    spend(100)
+    assert client.get(f'/api/budgets/insights?month={month}').json()['items'][0]['status']=='limit'
+    spend(50)
+    result=client.get(f'/api/budgets/insights?month={month}').json()
+    assert result['items'][0]['status']=='exceeded'
+    assert result['summary']['critical_count']==1
+    assert result['summary']['at_risk_count']==1
+    assert result['alerts'][0]['over_by']==50
+    assert client.get(f'/api/dashboard?month={month}').json()['budget_alerts'][0]['category']==category['name']
+    assert client.get('/api/budgets/insights?month=2021-01').json()['is_current_month'] is False
+    assert client.get('/api/budgets/insights?month=2021-01').json()['items']==[]
+    assert client.get('/api/budgets/insights?month=invalid').status_code==422
+    before=client.get('/api/transactions').json()['total']
+    for _ in range(2):
+        assert client.get(f'/api/budgets/insights?month={month}').status_code==200
+    assert client.get('/api/transactions').json()['total']==before
+    # 0-limit is meaningful, never divide by zero.
+    assert auth_post(client,'/api/budgets',{'month':month,'category_id':category['id'],'amount':0},method='put',csrf=csrf).status_code==200
+    assert client.get(f'/api/budgets/insights?month={month}').json()['items'][0]['status']=='exceeded'
+    # Snapshot projection must never mutate data or create ledger entries.
+    assert client.get('/api/transactions').json()['total']==before
+    # Other users do not see the category's budget or warnings.
+    assert auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'}).status_code==200
+    owner_budget=client.get(f'/api/budgets/insights?month={month}').json()
+    assert all(b['category_id']!=category['id'] or b['amount']!=0 for b in owner_budget['items'])
+    # Deterministic scenarios for past/future months must remain read-only.
+    with SessionLocal() as db:
+        future_month=(today_day.replace(day=1)+timedelta(days=40)).strftime('%Y-%m')
+        from backend.app import User
+        user=db.query(User).filter_by(username='smartbudget21').one()
+        data=compute_budget_insights(db,user.id,future_month,as_of=today_day)
+        assert data['is_current_month'] is False
+
+
+def test_smart_budget_pending_recurring_not_double_counted(client):
+    """Future due dates count once; already skipped/posted periods are excluded."""
+    from datetime import date, timedelta
+    from calendar import monthrange
+    from sqlalchemy import select
+    from backend.app import (SessionLocal, User, Budget, Category, Wallet,
+                             RecurringRule, RecurringRun, compute_budget_insights)
+    with SessionLocal() as db:
+        user=db.scalar(select(User).where(User.username=='smartbudget21'))
+        assert user is not None
+        budget=db.scalar(select(Budget).where(Budget.user_id==user.id))
+        assert budget is not None
+        category=db.get(Category,budget.category_id)
+        wallet=db.scalar(select(Wallet).where(Wallet.user_id==user.id))
+        start=date.today().replace(day=1)
+        last=monthrange(start.year,start.month)[1]
+        budget.amount=1000000
+        rule=RecurringRule(user_id=user.id,category_id=category.id,wallet_id=wallet.id,
+                           kind='expense',title='Hóa đơn theo ngày',amount=2000,
+                           frequency='daily',start_on=start+timedelta(days=1),
+                           mode='manual',next_index=0,remind_days=1,active=True)
+        db.add(rule)
+        db.flush()
+        month=start.strftime('%Y-%m')
+        initial=compute_budget_insights(db,user.id,month,as_of=start)['items'][0]
+        assert initial['scheduled_count']==last-1
+        assert initial['scheduled_remaining']==(last-1)*2000
+        db.add(RecurringRun(user_id=user.id,rule_id=rule.id,due_on=start+timedelta(days=1),status='skipped'))
+        db.flush()
+        updated=compute_budget_insights(db,user.id,month,as_of=start)['items'][0]
+        assert updated['scheduled_count']==initial['scheduled_count']-1
+        assert updated['scheduled_remaining']==initial['scheduled_remaining']-2000
+        # Test uses transaction rollback, never posts a real schedule or payment.
+        db.rollback()

@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.20
+# MoneyFlow Local v1.0.21
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -160,7 +160,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.20
+.\scripts\publish.ps1 -Version 1.0.21
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -173,7 +173,7 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.20
+.\scripts\publish.ps1 -Version 1.0.21
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
@@ -261,6 +261,7 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | **v1.0.18** | **Dự báo dòng tiền 30/60/90 ngày từ lịch định kỳ, phân bổ trả nợ gốc theo thu nhập, phát hiện nguy cơ âm từng ví và cảnh báo kỳ quá hạn, API chỉ đọc không thay số dư.** |
 | **v1.0.19** | **Tiền tích để dành (quỹ tích lũy linh hoạt): tạo nhiều quỹ không bắt buộc mục tiêu/hạn mức, góp từ ví hoặc rút về ví, sổ góp/rút bất biến, kiểm tra số dư từng ví và phân quyền. Số dư khả dụng trừ khoản để dành, tài sản ròng cộng lại khoản này; báo cáo Excel/PDF tách riêng tích lũy và mục tiêu tiết kiệm.** |
 | **v1.0.20** | **Tích để dành tự động: mỗi quỹ có thể trích 1–100% của thu nhập sau trả nợ, hoặc số tiền cố định. Chọn ví áp dụng; ghi bút toán tự động có liên kết giao dịch gốc, hoàn tác an toàn khi sửa/xóa thu nhập, dự báo số dư sau khi dành riêng tiền. Kiểm tra migration v1.0.19 và chống nhân đôi.** |
+| **v1.0.21** | **Ngân sách thông minh: cảnh báo mốc 70%, 90%, 100% cho từng danh mục; dự báo mức chi cuối tháng từ tốc độ chi và lịch chi còn lại, tránh cộng trùng; gợi ý hạn mức chi/ngày, cảnh báo ngay tại Dashboard; API chỉ đọc, không migration database.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.
 
@@ -278,4 +279,14 @@ Mở **Tiền tích để dành** trên menu. Tạo quỹ linh hoạt (ví dụ 
 - Khi sửa hoặc xóa khoản thu có tiền tích tự động, chương trình chỉ hoàn tác các bút toán tự động của chính khoản thu đó, phục hồi nợ gốc và đánh giá lại quy tắc. Nếu đã rút tiền từ quỹ khiến không đủ để hoàn tác, hệ thống **chặn thao tác** và giữ nguyên toàn bộ số dư; cần góp hoàn tiền vào quỹ trước.
 - Trang **Dự báo dòng tiền** bổ sung chỉ tiêu **Dự kiến để dành**, tính trên các khoản thu định kỳ giả định và dự báo **số dư khả dụng sau trừ nợ, tích lũy**. Dự báo chỉ đọc, không tự tạo bút toán. Báo cáo Excel/PDF hiện có tiếp tục ghi các khoản quỹ như **tài sản dành riêng**, không cộng hai lần vào thu/chi.
 - Database **không thêm bảng mới**: bổ sung `auto_mode`, `auto_value`, `auto_wallet_id` vào `stash_funds` và `source_entry_id` vào `stash_movements`, thêm unique partial index cho (quỹ, giao dịch thu). Migration PostgreSQL/SQLite chạy **idempotent** và giữ quỹ/lịch sử từ v1.0.19. Quy tắc cũ tự mặc định `off`.
-- Tài khoản và số dư hiện tại vẫn nằm trong PostgreSQL Docker cũ; không xóa volume. Trên Windows, dùng `scripts/run.ps1` để tự mở Docker Desktop → test/build/chạy; `scripts/publish.ps1 -Version 1.0.20` để phát hành và xác minh GitHub Release.
+- Tài khoản và số dư hiện tại vẫn nằm trong PostgreSQL Docker cũ; không xóa volume. Trên Windows, dùng `scripts/run.ps1` để tự mở Docker Desktop → test/build/chạy; `scripts/publish.ps1 -Version 1.0.21` để phát hành và xác minh GitHub Release.
+
+
+## v1.0.21 — Ngân sách thông minh
+
+- **Ngân sách** hiển thị ngưỡng sử dụng **70% (cảnh báo), 90% (nguy cơ cao), 100% (chạm hạn mức)** và **vượt hạn mức** theo từng danh mục. Dashboard hiển thị cảnh báo nổi bật và nút mở trang ngân sách.
+- Với **tháng hiện tại**, dự báo chi cuối tháng dùng kịch bản cao hơn giữa (1) tốc độ chi thực tế từ đầu tháng, cộng chi tiêu đã ghi ngày tương lai; và (2) số đã ghi cộng các kỳ chi định kỳ chưa xử lý còn lại. Cách này tránh đếm trùng hóa đơn định kỳ trong cả hai kịch bản. Đơn vị tiền là VNĐ nguyên, không tính chuyển ví hoặc trả nợ gốc là chi tiêu theo danh mục.
+- Hiển thị **mức có thể chi/ngày còn lại** = max(0, (hạn mức - tiền đã ghi - kỳ chi định kỳ còn lại) / số ngày còn lại), làm tròn xuống. Nếu cần tăng ngân sách, điều chỉnh thủ công ở nút **Chỉnh sửa**.
+- Với tháng quá khứ hoặc tương lai, chỉ xem số tiền đã ghi, **không dự báo**; tháng hiện tại hiển thị nhãn rõ là **ước tính**. Quỹ để dành và nợ không bị thay đổi. Lịch đã ghi hoặc bỏ qua được loại trừ khi dự báo khoản chi định kỳ còn lại.
+- Endpoint **GET `/api/budgets/insights?month=YYYY-MM`** được bảo vệ bởi phiên đăng nhập và có `Cache-Control: no-store`; không ghi dữ liệu. Cấu trúc bảng PostgreSQL giữ nguyên, không tạo migration mới.
+- Lệnh phát hành: `scripts/publish.ps1 -Version 1.0.21`. Kết quả thực tế trên Windows cần được xác minh bằng `scripts/run.ps1` trước khi công bố GitHub Release.

@@ -2239,6 +2239,128 @@ def upsert_budget(data:NewBudget,u:User=Depends(current),db:Session=Depends(get_
     log(db,u.id,'budget_saved',f'{data.category_id} {data.month}: {data.amount}');db.commit();return {'ok':True}
 
 
+
+def compute_budget_insights(db: Session, user_id: int, month: str,
+                            as_of: date | None = None) -> dict:
+    """Read-only budget health and conservative end-of-month estimates.
+
+    Spending is scoped to the authenticated user and explicit expense category.
+    Only the current calendar month is projected. Already recorded expenses and
+    pending recurring expense occurrences are NOT blindly added to the daily pace;
+    we use the larger scenario to avoid double-counting routine bills.
+    """
+    year, number = valid_month(month)
+    start, finish = month_bounds(month)  # finish is exclusive
+    today_day = as_of or date.today()
+    is_current = (today_day.year, today_day.month) == (year, number)
+    last_day = (finish - timedelta(days=1))
+    remaining_days = max(0, (last_day - today_day).days) if is_current else 0
+    elapsed = today_day.day if is_current else 0
+
+    budgets = list(db.scalars(select(Budget).where(
+        Budget.user_id == user_id, Budget.year == year, Budget.month == number
+    ).order_by(Budget.category_id)))
+    if not budgets:
+        return {'month':month,'is_current_month':is_current,'as_of':today_day.isoformat(),
+                'days_remaining':remaining_days,'items':[],'alerts':[],
+                'summary':{'count':0,'budget_total':0,'spent_total':0,
+                           'critical_count':0,'warning_count':0,'at_risk_count':0}}
+    cat_map = {c.id:c for c in db.scalars(select(Category).where(
+        Category.user_id==user_id,Category.kind=='expense'))}
+    category_ids = [b.category_id for b in budgets if b.category_id in cat_map]
+    if not category_ids:
+        return {'month':month,'is_current_month':is_current,'as_of':today_day.isoformat(),
+                'days_remaining':remaining_days,'items':[],'alerts':[],
+                'summary':{'count':0,'budget_total':0,'spent_total':0,
+                           'critical_count':0,'warning_count':0,'at_risk_count':0}}
+    records = db.execute(select(Entry.category_id,Entry.occurred_on,Entry.amount).where(
+        Entry.user_id==user_id,Entry.kind=='expense',Entry.category_id.in_(category_ids),
+        Entry.occurred_on>=start,Entry.occurred_on<finish)).all()
+    booked=defaultdict(int)
+    spent_so_far=defaultdict(int)
+    future_booked=defaultdict(int)
+    for category_id, occurred_on, amount in records:
+        booked[category_id]+=int(amount)
+        if occurred_on<=today_day:
+            spent_so_far[category_id]+=int(amount)
+        else:
+            future_booked[category_id]+=int(amount)
+
+    scheduled=defaultdict(int)
+    scheduled_counts=defaultdict(int)
+    if is_current and remaining_days:
+        planned = list(db.scalars(select(RecurringRule).where(
+            RecurringRule.user_id==user_id,RecurringRule.active==True,
+            RecurringRule.kind=='expense',RecurringRule.category_id.in_(category_ids))))
+        run_ids=[r.id for r in planned]
+        processed = set(db.execute(select(RecurringRun.rule_id,RecurringRun.due_on).where(
+            RecurringRun.user_id==user_id,RecurringRun.rule_id.in_(run_ids),
+            RecurringRun.due_on>today_day,RecurringRun.due_on<finish)).all()) if run_ids else set()
+        for rule in planned:
+            for due in forecast_due_dates(rule,today_day+timedelta(days=1),last_day):
+                if (rule.id,due) in processed:
+                    continue
+                scheduled[rule.category_id] += int(rule.amount)
+                scheduled_counts[rule.category_id] += 1
+
+    items=[]
+    for b in budgets:
+        c=cat_map.get(b.category_id)
+        if not c:
+            continue
+        amount=int(b.amount)
+        spent=booked[b.category_id]
+        fraction=(spent/amount) if amount else None
+        if spent>amount:
+            status='exceeded'
+        elif amount==0 and spent==0:
+            status='zero'
+        elif spent==amount:
+            status='limit'
+        elif fraction is not None and fraction>=0.90:
+            status='critical'
+        elif fraction is not None and fraction>=0.70:
+            status='warning'
+        else:
+            status='ok'
+        forecast = None
+        predicted_risk = False
+        safe_daily = None
+        if is_current:
+            # Daily pace and already recorded future entries are separate.
+            pace=(spent_so_far[b.category_id]*monthrange(year,number)[1]+elapsed-1)//elapsed
+            scenario_pace=pace+future_booked[b.category_id]
+            scenario_planned=spent+scheduled[b.category_id]
+            forecast=max(spent,scenario_pace,scenario_planned)
+            predicted_risk=forecast>amount
+            safe_daily = max(0,(amount-spent-scheduled[b.category_id])//remaining_days) if remaining_days else 0
+        items.append({'category_id':c.id,'category':c.name,'color':c.color,
+                      'amount':amount,'spent':spent,'spent_percent':round(fraction*100,1) if fraction is not None else None,
+                      'remaining':max(0,amount-spent),'over_by':max(0,spent-amount),
+                      'status':status,'projected_spent':forecast,'projected_over':max(0,forecast-amount) if forecast is not None else None,
+                      'at_risk':predicted_risk,'scheduled_remaining':scheduled[b.category_id] if is_current else None,
+                      'scheduled_count':scheduled_counts[b.category_id] if is_current else None,
+                      'safe_daily':safe_daily})
+    priority={'exceeded':0,'limit':1,'critical':2,'warning':3,'zero':4,'ok':5}
+    alerts=[r for r in items if r['status'] in ('exceeded','limit','critical','warning') or (r['at_risk'] and r['status']=='ok')]
+    alerts.sort(key=lambda r:(priority[r['status']] if r['status']!='ok' else 4,
+                              -int(r['projected_over'] or 0),r['category_id']))
+    return {'month':month,'is_current_month':is_current,'as_of':today_day.isoformat(),
+            'days_remaining':remaining_days,'items':items,'alerts':alerts,
+            'summary':{'count':len(items),'budget_total':sum(r['amount'] for r in items),
+                       'spent_total':sum(r['spent'] for r in items),
+                       'critical_count':sum(r['status'] in ('exceeded','limit','critical') for r in items),
+                       'warning_count':sum(r['status']=='warning' for r in items),
+                       'at_risk_count':sum(r['at_risk'] for r in items) if is_current else 0}}
+
+
+@app.get('/api/budgets/insights')
+def budget_insights(month: str, response: Response,
+                    u: User = Depends(current), db: Session = Depends(get_db)):
+    response.headers['Cache-Control']='no-store'
+    return compute_budget_insights(db, u.id, month)
+
+
 @app.get('/api/dashboard')
 def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     y,m=valid_month(month);a,b=month_bounds(month)
@@ -2267,6 +2389,7 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
         trend.append({'month':key,'income':map_hist[key]['income'],'expense':map_hist[key]['expense']})
     recent=list(db.scalars(select(Entry).where(Entry.user_id==u.id).order_by(Entry.occurred_on.desc(),Entry.id.desc()).limit(6)))
     budgets=list_budgets(month,u,db)
+    budget_health=compute_budget_insights(db,u.id,month)
     ids=[e.id for e in recent]
     allocations=dict(db.execute(select(DebtPayment.entry_id,func.sum(DebtPayment.amount)).where(DebtPayment.user_id==u.id,DebtPayment.entry_id.in_(ids)).group_by(DebtPayment.entry_id)).all()) if ids else {}
     savings_reserved=total_reserved_savings(db,u.id)
@@ -2275,7 +2398,9 @@ def dashboard(month:str,u:User=Depends(current),db:Session=Depends(get_db)):
     return {'savings_reserved':savings_reserved,'stash_reserved':stash_reserved,'reserved_total':reserved_total,'total_assets':balance+reserved_total,'balance':balance,'opening_balance':default_wallet(db,u.id).opening_balance,'total_opening_balance':sum(w.opening_balance for w in wallets),'wallet_count':len(wallets),'wallets':[wallet_json(db,w) for w in wallets],'total_income':all_income,'total_expense':all_expense,
             'month_income':inc,'month_expense':exp,'month_count':len(month_entries),'net':inc-exp,
             'categories':category_chart,'trend':trend,'recent':[entry_json(e,cats,int(allocations.get(e.id,0))) for e in recent],
-            'budgets':budgets,'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
+            'budgets':budgets,'budget_alerts':budget_health['alerts'][:5],
+            'budget_health':budget_health['summary'],
+            'overspent_budgets':sum(1 for bb in budgets if bb['spent']>bb['amount']),
             'debt_remaining':debt_remaining,'receivable_remaining':receivable_remaining,'debt_paid':debt_paid,'month_debt_paid':month_debt_paid,'net_worth':balance+reserved_total-debt_remaining+receivable_remaining}
 
 

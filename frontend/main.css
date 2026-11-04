@@ -414,3 +414,23 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .stash-rule-section h3 {font-size:14px;color:#e5edff;margin:0 0 14px;font-weight:700;}
 .stash-rule-section label {display:block;margin:0 0 11px;}
 .stash-rule-section .simple-info {margin-top:12px;}
+
+
+/* v1.0.21 – Smart budgets, consistent with the MoneyFlow dark palette. */
+.smart-budget-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px;margin:0 0 18px}
+.smart-kpi{background:#18243c;border:1px solid #34425f;border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:9px}
+.smart-kpi span{font-size:12px;color:#9baad0}.smart-kpi strong{font-size:24px;color:#f7f8ff;overflow-wrap:anywhere}.smart-kpi small{font-size:11px;color:#8194b7}
+.smart-budget-note{background:#242943;border:1px solid #3b4c6b;color:#c8d4f2;font-size:12px;border-radius:13px;line-height:1.7;padding:12px 16px;margin-bottom:19px}
+.smart-budget-grid{margin-bottom:20px}.smart-budget-tile{min-width:0;position:relative}
+.smart-budget-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0}.smart-budget-meta>span:last-child{font-size:11px;color:#a9b8d8}
+.smart-status{display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;padding:5px 9px;border-radius:9px;font-weight:750;font-size:10px;letter-spacing:.02em;background:#213c39;color:#80ebcb}
+.smart-warning{margin:12px 0 0;color:#ffd6dd;font-size:12px;line-height:1.6}.smart-status.smart-warning{background:#4a3d23;color:#ffda81}
+.smart-status.smart-critical{background:#523527;color:#ffc1a1}.smart-status.smart-limit,.smart-status.smart-exceeded{background:#562c40;color:#ffafc4}.smart-status.smart-zero{background:#444052;color:#d8c5e9}
+.smart-budget-prediction{display:grid;gap:10px;margin-top:15px;padding:14px;border:1px solid #384765;border-radius:12px;background:#19243a}
+.smart-budget-prediction>div{display:flex;justify-content:space-between;gap:15px;align-items:baseline}.smart-budget-prediction span{font-size:11px;color:#97a9cc}.smart-budget-prediction strong{font-size:12px;color:#f5f7ff;text-align:right}.smart-budget-prediction .smart-over{color:#ffc0cc}
+.smart-historical{font-size:11px;color:#a7b3ce;line-height:1.6;margin-top:15px}
+.smart-budget-alerts{margin-top:18px}.smart-alert-list{display:grid;gap:10px}.smart-alert-row{display:flex;gap:12px;align-items:center;padding:10px 12px;background:#192840;border:1px solid #34425e;border-radius:11px}
+.smart-alert-row strong{font-size:12px;color:#f1f3ff}.smart-alert-row>span:last-child{margin-left:auto;text-align:right;font-size:11px;color:#adc0df}
+@media(max-width:1200px){.smart-budget-overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.smart-budget-overview{grid-template-columns:1fr 1fr;gap:9px}.smart-kpi{padding:13px}.smart-kpi strong{font-size:18px}.smart-alert-row{flex-wrap:wrap}.smart-alert-row>span:last-child{margin-left:0;width:100%;text-align:left}}
+@media(max-width:400px){.smart-budget-overview{grid-template-columns:1fr}}

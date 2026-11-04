@@ -56,9 +56,9 @@ const responses = {
   'wallets': { items: [wallet], transfers: [], total_balance: wallet.balance },
   'stashes': {items:[{id:1,name:'Tiền tích để dành',note:'Quỹ linh hoạt',auto_mode:'percent',auto_value:10,auto_wallet_id:1,saved_amount:50000,created_at:'2026-11-03'}],total_saved:50000,history:[]},
   'savings': {items: [{id:1,name:'Quỹ dự phòng',target_amount:200000,saved_amount:25000,remaining_amount:175000,progress_pct:12.5,complete:false,due_date:null,note:'Tích lũy',created_at:'2026-11-01'}],total_saved:25000,total_targets:200000,history:[]},
-  'dashboard': dashboard,
+  'dashboard': {...dashboard, budget_alerts:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,status:'critical',at_risk:true,projected_over:500}]},
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
-  'budgets': [], 'debts': debtData, 'users': [fakeUser],
+  'budgets': [], 'budgets/insights':{month:'2026-11',is_current_month:true,as_of:'2026-11-04',days_remaining:26,summary:{count:1,budget_total:1000,spent_total:950,critical_count:1,warning_count:0,at_risk_count:1},items:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,spent_percent:95,remaining:50,over_by:0,status:'critical',projected_spent:1400,projected_over:400,at_risk:true,scheduled_remaining:200,scheduled_count:1,safe_daily:0}],alerts:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,status:'critical',at_risk:true,projected_over:400}]}, 'debts': debtData, 'users': [fakeUser],
   'recurring': {items:[],history:[]}, 'reminders': {items:[],overdue_count:0,upcoming_count:0},
   'reports': {end_month:'2026-11',from_month:'2025-12',to_month:'2026-11',months_count:12,totals:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},snapshot:{cash_balance:100000,payable:0,receivable:0,net_worth:100000},selected_month:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},comparison:{income:{current:100,previous:0,difference:100,percentage:null},expense:{current:40,previous:0,difference:40,percentage:null},net_cash:{current:60,previous:0,difference:60,percentage:null}},monthly:Array.from({length:12},(_,i)=>({month:`2026-${String(i+1).padStart(2,'0')}`,income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60})),categories:[{name:'Ăn uống',color:'#6475ff',amount:40}],transfer_count:0},
   'forecast': {as_of:'2026-11-03',through:'2026-12-03',horizon_days:30,start_balance:100000,end_balance:45000,net_change:-55000,income_gross:30000,expense:75000,debt_allocated:10000,min_total_balance:45000,first_shortfall_on:null,risk_wallet_count:0,overdue_rules:[],inactive_wallet_rules:[],payable_remaining_scenario:0,wallets:[{id:1,name:'Ví chính',active:true,start_balance:100000,projected_balance:45000,lowest_balance:45000,first_shortfall_on:null}],timeline:Array.from({length:31},(_,i)=>({date:`2026-11-${String(i+3).padStart(2,'0')}`,balance:100000-i*1000,income:0,expense:0,debt_paid:0,shortfall:false})),total_events:2,events:[{due_on:'2026-11-20',title:'Lương',wallet_name:'Ví chính',kind:'income',mode:'manual',amount:30000,allocated_to_debt:10000,net_wallet_delta:20000}] ,truncated_events:false,assumptions:['Chỉ dự báo lịch định kỳ đang hoạt động.']},
@@ -90,7 +90,7 @@ assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup
 
 const pages = [
   ['dashboard', 'Xin chào'], ['forecast','Dự báo dòng tiền'], ['savings', 'Mục tiêu tiết kiệm'], ['stashes', 'Tiền tích để dành'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
-  ['transactions', 'Quản lý giao dịch'], ['budgets', 'Ngân sách chi tiêu'],
+  ['transactions', 'Quản lý giao dịch'], ['budgets', 'Ngân sách thông minh'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
   ['audit', 'Nhật ký hoạt động'],
@@ -167,3 +167,12 @@ assert.match(element('#modal-root').innerHTML,/Góp vào tiền để dành/);
 await runInContext('stashMovementModal(state.stashData.items[0], "withdraw")',context);
 assert.match(element('#modal-root').innerHTML,/Rút tiền về ví/);
 console.log('Stash funds smoke PASS: dashboard navigation, fund lifecycle, deposit and withdraw.');
+
+await runInContext('navigate("budgets")',context);
+assert.match(element('#page-content').innerHTML,/Cảnh báo 70%/);
+assert.match(element('#page-content').innerHTML,/Cuối tháng dự kiến/);
+assert.match(element('#page-content').innerHTML,/Có thể chi\/ngày còn lại/);
+await runInContext('navigate("dashboard")',context);
+assert.match(element('#page-content').innerHTML,/Cảnh báo ngân sách/);
+assert.ok(visited.includes('budgets/insights'), 'Smart budget endpoint was not fetched');
+console.log('Smart budget smoke PASS: 70/90/100 warnings, month projection, safe daily estimate, dashboard alerts.');
