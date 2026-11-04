@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.24
+# MoneyFlow Local v1.0.25
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -67,6 +67,16 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
 
+## v1.0.25 — Cài đặt PWA và thông báo Windows có kiểm soát
+
+- **Cài ứng dụng:** thêm `manifest.webmanifest`, icon 192/512 px và service worker. Chrome/Edge trên Windows có thể cài MoneyFlow từ mục **Cài đặt → Ứng dụng & thông báo máy tính** hoặc menu trình duyệt. Trên điện thoại chỉ có thể dùng **Thêm vào màn hình chính** sau khi quản trị viên chủ động cấu hình đường truy cập HTTPS bảo mật vào máy Windows; mặc định ứng dụng chỉ lắng nghe `127.0.0.1` và **không thể truy cập từ điện thoại**.
+- **An toàn dữ liệu:** cache PWA chỉ chứa HTML trang lỗi offline và các tài nguyên công khai (CSS, JS, biểu tượng). **Không cache `/api/`, `/reset`, trang HTML cá nhân hóa, số dư, giao dịch, token hay cookies.** Nếu máy chủ/Docker không chạy, hiển thị trang *Không thể kết nối*; không hỗ trợ tạo/sửa giao dịch offline.
+- **Nhắc lịch qua thông báo hệ điều hành:** người dùng phải bấm **Bật thông báo nhắc lịch** và cấp quyền từ trình duyệt. Nội dung thông báo chỉ mang tính chung, không chứa số tiền hoặc tên giao dịch. Hệ thống kiểm tra mỗi 5 phút **khi tab hoặc PWA vẫn mở ở nền**, không có push khi ứng dụng đã đóng. Có thể tắt tại Cài đặt. Mỗi tài khoản tối đa một thông báo/ngày trên một trình duyệt.
+- **Trải nghiệm mobile:** nút thao tác dễ chạm hơn, hỗ trợ khoảng cách an toàn phần đáy, thu gọn thanh điều hướng, tôn trọng cấu hình giảm chuyển động.
+- **Triển khai HTTPS:** cần tin cậy chứng chỉ Caddy nội bộ thì PWA mới có thể đăng ký trên Chrome/Edge; browser có thể cho phép service worker ở localhost nhưng vẫn cảnh báo khi chứng chỉ HTTPS không tin cậy. Phải dùng chính địa chỉ đã cài để mở lại. `localhost` khác `127.0.0.1` là hai origin khác nhau.
+- **Kiểm thử:** CI/PowerShell chạy syntax kiểm tra `app.js`, `pwa.js`, `sw.js`, cùng smoke test PWA, manifest và các route tĩnh; bộ API vẫn chạy độc lập.
+- **Cập nhật thư viện:** giữ cơ chế Dependabot của v1.0.24 (Python hằng ngày, Docker/Actions hằng tuần; CI bắt buộc trước khi gộp). Không tự động nâng PostgreSQL major hoặc bỏ kiểm thử.
+
 ## v1.0.24 - Thống kê theo năm và tự động kiểm soát phiên bản thư viện
 
 **Thong ke theo nam**
@@ -92,7 +102,7 @@ Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
 .\scripts\run.ps1
-.\scripts\publish.ps1 -Version 1.0.24
+.\scripts\publish.ps1 -Version 1.0.25
 ```
 
 Giu mot `README.md` duy nhat, khong them huong dan Patch hay sao luu vao quy trinh mac dinh.

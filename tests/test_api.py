@@ -1459,3 +1459,40 @@ def test_annual_finances_and_exports_no_side_effects(client):
         assert r.status_code==200
         other_data=other.get('/api/reports/annual?year=2026').json()
         assert other_data['totals']['income']!=obj['totals']['income']
+
+
+def test_pwa_static_is_public_only(client):
+    """Install assets are explicitly allowlisted and do not reveal sensitive data."""
+    import json
+    from PIL import Image
+    from io import BytesIO
+    manifest_response = client.get('/manifest.webmanifest')
+    assert manifest_response.status_code == 200
+    assert 'application/manifest+json' in manifest_response.headers['content-type']
+    manifest=json.loads(manifest_response.text)
+    assert manifest['start_url']=='/' and manifest['scope']=='/'
+    assert manifest['display']=='standalone'
+    assert {x['sizes'] for x in manifest['icons']}=={'192x192','512x512'}
+    assert any(icon.get('purpose')=='maskable' for icon in manifest['icons'])
+    assert client.get('/icon-512-maskable.png').status_code == 200
+    for size in [192,512]:
+        response=client.get(f'/icon-{size}.png')
+        assert response.status_code==200
+        assert Image.open(BytesIO(response.content)).size==(size,size)
+    for path in ['/pwa.js','/sw.js','/offline.html']:
+        response=client.get(path)
+        assert response.status_code==200
+        assert response.headers.get('cache-control')=='no-store'
+        assert 'nosniff'==response.headers.get('x-content-type-options')
+    assert client.get('/sw.js').headers['service-worker-allowed']=='/'
+    sw=client.get('/sw.js').text
+    assert "url.pathname.startsWith('/api/')" in sw
+    assert "url.pathname === '/reset'" in sw
+    assert 'index.html' not in sw
+    assert client.get('/backend/app.py').status_code==404
+    assert client.get('/.env').status_code==404
+    assert client.get('/frontend/pwa.js').status_code==404
+    home=client.get('/').text
+    assert 'rel="manifest"' in home
+    assert '/pwa.js?v=1.0.25' in home
+    assert '/app.js?v=1.0.25' in home

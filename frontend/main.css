@@ -480,3 +480,20 @@ select option { background: #1d2b47; color: #f3f6ff; }
 
 /* v1.0.24 Annual statements */
 .annual-plot{width:100%;overflow:hidden;padding:10px 12px 0}.annual-plot svg{width:100%;height:auto;min-height:180px;display:block}.annual-disclaimer{color:var(--muted,#9ba8c2);font-size:12px;line-height:1.7;margin:16px 0 25px}.annual-plot circle:hover{r:7}
+
+/* MoneyFlow v1.0.25 - PWA settings and touch-friendly compact layouts */
+.pwa-settings{margin-top:18px}
+.pwa-actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0 12px}
+.pwa-settings #pwa-status{min-height:26px;line-height:1.6}
+.pwa-settings .simple-info{margin-top:12px}
+@media(max-width:700px){
+ .page-content{padding-bottom:calc(28px + env(safe-area-inset-bottom,0px))}
+ .app-footer{padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
+ .pwa-actions{display:grid;grid-template-columns:1fr;gap:10px}
+ .pwa-actions .btn{min-height:46px;white-space:normal;text-align:center}
+ .topbar-actions{min-width:0}
+ .breadcrumb{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+ .heading-actions .btn{min-height:44px}
+ .modal{max-height:calc(100dvh - 22px)}
+}
+@media(prefers-reduced-motion:reduce){.btn:hover{transform:none}.toast{animation:none}}

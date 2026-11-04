@@ -3098,5 +3098,11 @@ def root():
 
 @app.get('/{asset:path}')
 def static_assets(asset:str):
-    if asset not in {'main.css','app.js','favicon.svg','logo.svg','apple-touch-icon.png'}:raise HTTPException(404,'Không tìm thấy tệp.')
-    return FileResponse(STATIC/asset)
+    if asset not in {'main.css','app.js','pwa.js','sw.js','manifest.webmanifest','offline.html',
+                      'favicon.svg','logo.svg','apple-touch-icon.png','icon-192.png','icon-512.png','icon-512-maskable.png'}:
+        raise HTTPException(404, 'Không tìm thấy tệp.')
+    mime = {'manifest.webmanifest':'application/manifest+json', 'sw.js':'text/javascript',
+            'pwa.js':'text/javascript', 'offline.html':'text/html',
+            'icon-192.png':'image/png', 'icon-512.png':'image/png', 'icon-512-maskable.png':'image/png'}
+    headers = {'Service-Worker-Allowed':'/'} if asset == 'sw.js' else None
+    return FileResponse(STATIC/asset, media_type=mime.get(asset), headers=headers)

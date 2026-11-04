@@ -13,8 +13,14 @@ Write-Host '[3/3] Check frontend JavaScript (when Node.js is installed)...' -For
 if (Get-Command node -ErrorAction SilentlyContinue) {
     & node --check frontend/app.js
     if ($LASTEXITCODE -ne 0) { throw 'Frontend JavaScript syntax invalid.' }
+    & node --check frontend/pwa.js
+    if ($LASTEXITCODE -ne 0) { throw 'PWA JavaScript syntax invalid.' }
+    & node --check frontend/sw.js
+    if ($LASTEXITCODE -ne 0) { throw 'Service worker syntax invalid.' }
     & node tests/frontend-smoke.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Frontend smoke tests failed; publishing must stop.' }
+    & node tests/pwa-smoke.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'PWA smoke tests failed; publishing must stop.' }
 } else {
     Write-Host 'Node.js not installed; JavaScript syntax check skipped locally (CI runs it).' -ForegroundColor Yellow
 }

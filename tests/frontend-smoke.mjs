@@ -145,6 +145,9 @@ console.log('Annual analytics smoke PASS: net worth history, table, selector, XL
 await runInContext('navigate("settings")',context);
 assert.match(element('#page-content').innerHTML,/Bật xác thực 2 bước/);
 assert.match(element('#page-content').innerHTML,/Phiên đăng nhập/);
+assert.match(element('#page-content').innerHTML,/Cài ứng dụng/);
+assert.match(element('#page-content').innerHTML,/data-action="pwa-notify-on"/);
+assert.match(element('#page-content').innerHTML,/data-action="pwa-notify-off"/);
 console.log('Security & export smoke PASS: TOTP setup, sessions and distinct Excel/PDF buttons.');
 
 assert.ok(visited.includes('savings'), 'Savings goals screen not fetched');
