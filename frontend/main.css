@@ -448,3 +448,32 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .receipt-preview img{max-width:100%;max-height:310px;object-fit:contain;border-radius:6px}
 .receipt-input{padding:9px;min-height:51px}
 @media(max-width:600px){.receipt-line{flex-wrap:wrap}.receipt-buttons{width:100%;justify-content:flex-start}}
+
+
+/* v1.0.23 - read-only financial reconciliation */
+.recon-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:20px}
+.recon-metric,.recon-wallet{background:#1e2945;border:1px solid #33415f;border-radius:15px;padding:20px}
+.recon-metric span{display:block;font-size:10px;letter-spacing:.8px;font-weight:700;color:#a7b6d5}
+.recon-metric strong{display:block;font-size:24px;letter-spacing:-.6px;margin-top:12px;color:#f3f5ff;overflow-wrap:anywhere}
+.recon-section{margin-top:20px}
+.recon-wallet-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.recon-wallet-title{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.recon-wallet-title strong{font-size:13px;color:#f4f6ff}
+.recon-tag{border-radius:30px;padding:5px 9px;font-size:10px;font-weight:750;white-space:nowrap}
+.recon-tag.ok{background:#164c42;color:#90f8ce}.recon-tag.alert{background:#633043;color:#ffc1cd}.recon-tag.pending{background:#34415e;color:#c7d2e7}
+.recon-book{font-size:23px;font-weight:850;color:#fff;margin:18px 0 4px;overflow-wrap:anywhere}
+.recon-foot{font-size:11px;color:#b0bfd9;line-height:1.8;border-top:1px solid #37435b;margin-top:13px;padding-top:10px}
+.recon-alert-text{color:#fb94a7!important;font-weight:800}.recon-ok-text{color:#70ebc6!important;font-weight:800}
+.recon-form{display:grid;grid-template-columns:1fr 1fr;gap:15px;align-items:end}
+.recon-form label{font-size:12px;font-weight:700;color:#c4d1ea;display:grid;gap:8px}
+.recon-form .recon-note{grid-column:1/-1}.recon-form button{justify-self:start}
+.recon-alert-row{display:flex;justify-content:space-between;align-items:center;gap:16px;border:1px solid #39455f;background:#222d48;padding:14px 17px;border-radius:11px;margin-bottom:9px;color:#dce5fc;font-size:12px}
+.recon-alert-row strong{font-size:13px;color:#f7f7ff}.recon-alert-row p{font-size:11px;color:#abb8d1;margin:6px 0 0;line-height:1.55}
+.recon-issue-icon{background:#753448;color:#fff;border-radius:8px;padding:4px 10px;font-weight:850}
+.recon-empty-ok{font-size:12px;color:#8becc2;background:#1d413c;border-radius:10px;padding:14px}
+@media(max-width:1120px){.recon-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:640px){.recon-summary,.recon-form{grid-template-columns:1fr}.recon-alert-row{align-items:flex-start;flex-direction:column}.recon-form button{justify-self:stretch}}
+
+/* Keep the expanded MoneyFlow navigation usable at smaller screen heights. */
+#main-nav{min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#465477 transparent;padding-bottom:8px}
+.sidebar-bottom{flex-shrink:0}

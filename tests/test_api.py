@@ -1284,3 +1284,136 @@ def test_transaction_receipts_private_validated_and_removed(client, monkeypatch,
                            {'confirm_username':'evidence22b'},method='delete',csrf=admin_csrf)
         assert deletion.status_code==200,deletion.text
         assert not list((tmp_path/'private-evidence').iterdir())
+
+
+def test_reconciliation_manual_count_does_not_change_cash_and_is_private(client):
+    """User-supplied physical/bank balance is evidence, not a book entry."""
+    owner = auth_post(client, '/api/login',
+        {'username':'owner','password':'SecurePassword@12345'})
+    assert owner.status_code == 200, owner.text
+    token = owner.json()['csrf_token']
+    for uname in ('recon23a','recon23b'):
+        made = auth_post(client, '/api/users', credentials(uname), csrf=token)
+        assert made.status_code == 200, made.text
+
+    with TestClient(app) as first, TestClient(app) as second:
+        r = auth_post(first, '/api/login', {'username':'recon23a','password':'SecurePassword@12345'})
+        assert r.status_code == 200
+        csrf = r.json()['csrf_token']
+        r = auth_post(second, '/api/login', {'username':'recon23b','password':'SecurePassword@12345'})
+        assert r.status_code == 200
+        other_csrf = r.json()['csrf_token']
+        wallet_id = first.get('/api/wallets').json()['items'][0]['id']
+        assert auth_post(first, '/api/opening-balance',
+            {'opening_balance':1_000_000},csrf=csrf,method='put').status_code == 200
+        second_wallet_id = second.get('/api/wallets').json()['items'][0]['id']
+        from backend.app import WalletReconciliation, SessionLocal
+        from sqlalchemy import select, func
+        with SessionLocal() as db:
+            before = db.scalar(select(func.count(WalletReconciliation.id)))
+        initial=first.get('/api/reconciliation')
+        assert initial.status_code == 200
+        assert initial.headers['cache-control']=='no-store'
+        assert initial.json()['wallets'][0]['book_balance'] == 1_000_000
+        assert initial.json()['wallets'][0]['last_check'] is None
+        with SessionLocal() as db:
+            assert db.scalar(select(func.count(WalletReconciliation.id))) == before
+        # CSRF, integer and cross-tenant wallet validation.
+        payload={'wallet_id':wallet_id,'counted_balance':950_000,'note':'Kiem tra thuc te'}
+        assert auth_post(first,'/api/reconciliation/check',payload).status_code == 403
+        assert auth_post(first,'/api/reconciliation/check',
+                         {**payload, 'counted_balance':-5},csrf=csrf).status_code == 422
+        assert auth_post(first,'/api/reconciliation/check',
+                         {**payload, 'counted_balance':1.2},csrf=csrf).status_code == 422
+        assert auth_post(first,'/api/reconciliation/check',
+                         {**payload, 'wallet_id':second_wallet_id},csrf=csrf).status_code == 422
+        assert auth_post(second,'/api/reconciliation/check',
+                         {**payload, 'wallet_id':wallet_id},csrf=other_csrf).status_code == 422
+        posted = auth_post(first,'/api/reconciliation/check',payload,csrf=csrf)
+        assert posted.status_code == 200, posted.text
+        checked=posted.json()
+        assert (checked['recorded_balance'],checked['counted_balance'],checked['difference']) == (1_000_000,950_000,-50_000)
+        assert first.get('/api/wallets').json()['items'][0]['balance'] == 1_000_000
+        assert first.get('/api/dashboard?month=2026-11').json()['balance'] == 1_000_000
+        seen=first.get('/api/reconciliation').json()
+        assert seen['summary']['latest_discrepancies']==1
+        assert seen['checks'][0]['id']==checked['id']
+        assert second.get('/api/reconciliation').json()['checks']==[]
+        # A new transaction never rewrites the historical observation's book balance.
+        inc_cat=next(x for x in first.get('/api/categories').json() if x['kind']=='income')
+        tx={'title':'Luong thu bo sung', 'kind':'income', 'amount':20_000,
+            'occurred_on':'2026-11-04', 'category_id':inc_cat['id'], 'wallet_id':wallet_id}
+        assert auth_post(first,'/api/transactions',tx,csrf=csrf).status_code==200
+        after=first.get('/api/reconciliation').json()
+        assert after['wallets'][0]['book_balance']==1_020_000
+        assert after['wallets'][0]['last_check']['recorded_balance']==1_000_000
+        assert after['wallets'][0]['last_check']['difference']==-50_000
+        assert after['summary']['book_total']==after['ledger_total']==1_020_000
+        # Another wallet without a check must still be distinct.
+        added=auth_post(first,'/api/wallets',{'name':'Ngan hang','kind':'bank','opening_balance':80_000},csrf=csrf)
+        assert added.status_code==200,added.text
+        after=first.get('/api/reconciliation').json()
+        assert after['summary']['wallet_count']==2
+        assert after['summary']['checked_wallets']==1
+        assert after['summary']['book_total']==1_100_000
+
+
+def test_reconciliation_detects_candidates_without_mutation(client):
+    with TestClient(app) as first:
+        r=auth_post(first,'/api/login',{'username':'recon23a','password':'SecurePassword@12345'})
+        assert r.status_code==200
+        csrf=r.json()['csrf_token']
+        categories=first.get('/api/categories').json()
+        income=next(x for x in categories if x['kind']=='income')
+        expense=next(x for x in categories if x['kind']=='expense')
+        wallet=first.get('/api/wallets').json()['items'][0]
+        start=first.get('/api/dashboard?month=2026-11').json()['balance']
+        # Repeat an identical payment; both rows must remain valid and unchanged.
+        payment={'title':'Chi phi test trung', 'kind':'expense', 'amount':25_000,
+                 'category_id':expense['id'], 'occurred_on':'2026-11-04', 'wallet_id':wallet['id']}
+        for _ in range(2):
+            r=auth_post(first,'/api/transactions',payment,csrf=csrf)
+            assert r.status_code==200,r.text
+        # Six peer entries allow robust median-based high-value warning.
+        for n in (17_000,18_000,19_000,20_000,21_000,22_000):
+            r=auth_post(first,'/api/transactions',{'title':f'Thu thuong {n}',
+                'kind':'income','amount':n,'occurred_on':'2026-11-04',
+                'wallet_id':wallet['id'],'category_id':income['id']},csrf=csrf)
+            assert r.status_code==200,r.text
+        r=auth_post(first,'/api/transactions',{'title':'Thu gia tri lon can doi soat',
+            'kind':'income','amount':1_500_000,'occurred_on':'2026-11-04',
+            'wallet_id':wallet['id'],'category_id':income['id']},csrf=csrf)
+        assert r.status_code==200,r.text
+        current=first.get('/api/dashboard?month=2026-11').json()['balance']
+        alert=first.get('/api/reconciliation').json()
+        assert alert['summary']['anomaly_candidates']>=2
+        assert any(x['type']=='duplicate_candidate' and x['entry_title']=='Chi phi test trung' for x in alert['anomalies'])
+        assert any(x['type']=='large_amount' and x['entry_title']=='Thu gia tri lon can doi soat' for x in alert['anomalies'])
+        assert first.get('/api/dashboard?month=2026-11').json()['balance']==current
+        assert current>start
+
+
+def test_reconciliation_latest_wallet_check_survives_history_limit(client):
+    """A quiet wallet's latest count must not disappear if another wallet is checked often."""
+    from backend.app import WalletReconciliation, SessionLocal, User, Wallet
+    from sqlalchemy import select
+    with SessionLocal.begin() as db:
+        account=db.scalar(select(User).where(User.username=='recon23a'))
+        wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==account.id).order_by(Wallet.id)))
+        assert len(wallets)==2
+        quiet=wallets[1]
+        db.add(WalletReconciliation(user_id=account.id,wallet_id=quiet.id,
+                    recorded_balance=80000,counted_balance=81000,difference=1000,note='Quiet wallet'))
+        for i in range(62):
+            db.add(WalletReconciliation(user_id=account.id,wallet_id=wallets[0].id,
+                    recorded_balance=1000000,counted_balance=1000000,difference=0,note=f'Check {i}'))
+    with TestClient(app) as c:
+        r=auth_post(c,'/api/login',{'username':'recon23a','password':'SecurePassword@12345'})
+        assert r.status_code==200
+        report=c.get('/api/reconciliation').json()
+        assert report['summary']['wallet_count']==2
+        assert report['summary']['checked_wallets']==2
+        assert report['summary']['latest_discrepancies']==1
+        quiet_row=next(row for row in report['wallets'] if row['id']==quiet.id)
+        assert quiet_row['last_check']['difference']==1000
+        assert len(report['checks'])==60

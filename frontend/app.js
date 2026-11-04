@@ -26,7 +26,7 @@ const thisMonth = () => today().slice(0,7);
 const monthText = m => {const [y,mo]=m.split('-');return `Tháng ${+mo}/${y}`};
 const pct=(a,b)=>b>0?Math.round(a/b*100):0;
 const state={user:null,csrf:null,loginTicket:null,needsSetup:false,authMode:'login',resetToken:null,page:'dashboard',month:thisMonth(),categories:[],transPage:1,transKind:'',transCategory:'',transSearch:'',transWallet:'',receiptSearch:'',receiptKind:'',receiptMonth:'',receiptPage:1,wallets:[],data:null,reminders:[],recurringData:null,reportMonths:12,forecastDays:30};
-const PAGE_NAMES={forecast:'Dự báo dòng tiền',reports:'Báo cáo tài chính',recurring:'Định kỳ & nhắc lịch',wallets:'Ví & tài khoản',stashes:'Tiền tích để dành',savings:'Mục tiêu tiết kiệm',dashboard:'Tổng quan',transactions:'Giao dịch',receipts:'Hóa đơn & chứng từ',budgets:'Ngân sách',debts:'Quản lý nợ',categories:'Danh mục',settings:'Cài đặt',users:'Người dùng',audit:'Nhật ký hệ thống'};
+const PAGE_NAMES={forecast:'Dự báo dòng tiền',reports:'Báo cáo tài chính',recurring:'Định kỳ & nhắc lịch',wallets:'Ví & tài khoản',stashes:'Tiền tích để dành',savings:'Mục tiêu tiết kiệm',dashboard:'Tổng quan',transactions:'Giao dịch',receipts:'Hóa đơn & chứng từ',reconciliation:'Đối soát tài chính',budgets:'Ngân sách',debts:'Quản lý nợ',categories:'Danh mục',settings:'Cài đặt',users:'Người dùng',audit:'Nhật ký hệ thống'};
 
 async function api(path, options={}) {
   const headers={...(options.headers||{})};
@@ -389,6 +389,51 @@ function savingsMoveModal(goal,kind){
  openModal(deposit?'Góp tiền vào mục tiêu':'Rút tiền về ví',`${goal.name} · ${deposit?'Dành riêng tiền':'Giải ngân khỏi quỹ'}`,body,'savings-movement',deposit?'Góp tiền':'Xác nhận rút');
 }
 
+// v1.0.23: read-only ledger checks and append-only manually observed balances.
+async function renderReconciliation(){
+ const d=await api('reconciliation');state.reconciliationData=d;
+ const sum=d.summary;
+ const latestLabel=c=>!c?'Chưa kiểm đếm':c.difference===0?'Đã khớp lúc kiểm đếm':'Có chênh lệch lúc kiểm đếm';
+ const cards=d.wallets.map(w=>{
+   const c=w.last_check;
+   return `<article class="recon-wallet"><div class="recon-wallet-title"><strong>${esc(w.name)}</strong><span class="recon-tag ${!c?'pending':c.difference?'alert':'ok'}">${latestLabel(c)}</span></div>`+
+     `<div class="recon-book">${fmoney(w.book_balance)}</div><div class="panel-sub">Số dư theo sổ MoneyFlow hiện tại</div>`+
+     (c?`<div class="recon-foot">Kiểm đếm gần nhất: ${esc(new Date(c.created_at).toLocaleString('vi-VN'))}<br>`+
+       `Ghi nhận thực tế: ${fmoney(c.counted_balance)} · Theo sổ lúc đó: ${fmoney(c.recorded_balance)}<br>`+
+       `Chênh lệch tại thời điểm kiểm: <b class="${c.difference?'recon-alert-text':'recon-ok-text'}">${signedMoney(c.difference)}</b></div>`:
+       `<div class="recon-foot">Chưa ghi nhận số dư thực tế của ví.</div>`)+`</article>`;
+ }).join('');
+ const anomalies=d.anomalies.map(a=>`<div class="recon-alert-row"><div><strong>${esc(a.title)}</strong>`+
+   `<div class="panel-sub">${esc(a.entry_title)} · ${esc(a.occurred_on)} · ${fmoney(a.amount)}</div>`+
+   `<p>${esc(a.description)}</p></div><button type="button" class="table-action" data-action="recon-find-entry" data-date="${esc(a.occurred_on)}" data-title="${esc(a.entry_title)}">Xem giao dịch</button></div>`).join('');
+ const integrity=d.integrity_issues.map(issue=>`<div class="recon-alert-row"><span class="recon-issue-icon">!</span><span>${esc(issue.detail)}</span></div>`).join('');
+ const history=d.checks.map(c=>`<tr><td>${esc(new Date(c.created_at).toLocaleString('vi-VN'))}</td>`+
+   `<td>${esc(d.wallets.find(w=>w.id===c.wallet_id)?.name||'Ví đã xóa')}</td>`+
+   `<td>${fmoney(c.recorded_balance)}</td><td>${fmoney(c.counted_balance)}</td>`+
+   `<td class="${c.difference?'recon-alert-text':'recon-ok-text'}">${signedMoney(c.difference)}</td><td>${esc(c.note||'—')}</td></tr>`).join('');
+ $('#page-content').innerHTML=heading('Đối soát & kiểm tra tài chính',
+   'So sánh sổ MoneyFlow với số tiền thực bạn tự kiểm đếm; phát hiện dấu hiệu cần xem lại. Không sửa số dư.',
+   `<button class="btn btn-secondary" data-action="recon-reload">↻ Kiểm tra lại</button>`)+
+ `<div class="recon-summary"><div class="recon-metric"><span>TỔNG SỐ DƯ THEO SỔ</span><strong>${fmoney(sum.book_total)}</strong></div>`+
+ `<div class="recon-metric"><span>VÍ ĐÃ TỪNG KIỂM</span><strong>${sum.checked_wallets}/${sum.wallet_count}</strong></div>`+
+ `<div class="recon-metric"><span>CHÊNH LỆCH LẦN GẦN NHẤT</span><strong>${sum.latest_discrepancies}</strong></div>`+
+ `<div class="recon-metric"><span>DẤU HIỆU CẦN XEM</span><strong>${sum.anomaly_candidates+sum.integrity_issues}</strong></div></div>`+
+ `<section class="panel"><div class="panel-head"><div><h2>◎ Số dư từng ví</h2><p class="panel-sub">Số liệu thực tế được nhập thủ công, không kết nối ngân hàng. Sổ hiện tại có thể đã thay đổi kể từ lần kiểm gần nhất.</p></div></div><div class="recon-wallet-grid">${cards}</div></section>`+
+ `<section class="panel recon-section"><div class="panel-head"><div><h2>Ghi nhận số dư thực tế</h2><p class="panel-sub">Hãy xem số dư thực trong ví/ngân hàng tại thời điểm này rồi nhập bên dưới. Đây chỉ là lưu kết quả đối soát, không cộng/trừ tiền.</p></div></div>`+
+ `<form class="recon-form" data-form="reconciliation"><label>Chọn ví<select name="wallet_id" class="select" required>${d.wallets.map(w=>`<option value="${w.id}">${esc(w.name)} · sổ ${fmoney(w.book_balance)}</option>`).join('')}</select></label>`+
+ `<label>Số dư thực tế (VNĐ)<input name="counted_balance" class="input" type="number" min="0" max="1000000000000" step="1" required placeholder="Nhập số tiền bạn kiểm đếm"/></label>`+
+ `<label class="recon-note">Ghi chú (không bắt buộc)<input name="note" class="input" maxlength="300" placeholder="Ví dụ: Theo số dư tài khoản ngân hàng lúc 19:30"/></label>`+
+ `<button type="submit" class="btn btn-primary">Lưu kết quả kiểm đếm</button></form></section>`+
+ `<section class="panel recon-section"><div class="panel-head"><div><h2>Kiểm tra tính nhất quán</h2><p class="panel-sub">Kiểm tra liên kết dữ liệu, số dư âm và sổ nợ/quỹ tiết kiệm. Không phải xác nhận số dư ngân hàng.</p></div></div>`+
+ (integrity||`<div class="recon-empty-ok">✓ Không phát hiện lỗi toàn vẹn trong phạm vi kiểm tra.</div>`)+`</section>`+
+ `<section class="panel recon-section"><div class="panel-head"><div><h2>Giao dịch cần xem lại</h2><p class="panel-sub">Dấu hiệu trùng và số tiền lớn dựa trên tối đa 2.000 giao dịch gần nhất; cảnh báo không có nghĩa là giao dịch sai.</p></div></div>`+
+ (anomalies||`<div class="recon-empty-ok">✓ Không phát hiện dấu hiệu đáng chú ý trong mẫu giao dịch đã xét.</div>`)+
+ (d.sample_limited?`<p class="panel-sub">Đã giới hạn mẫu ở 2.000 giao dịch gần nhất; kết quả không bao quát toàn bộ lịch sử.</p>`:'')+`</section>`+
+ `<section class="panel recon-section"><div class="panel-head"><div><h2>Lịch sử đối soát</h2><p class="panel-sub">Lưu tối đa 60 lần ghi nhận gần nhất ở danh sách này. Không tự điều chỉnh các khoản chênh lệch.</p></div></div>`+
+ `<div class="table-wrap"><table class="data-table"><thead><tr><th>THỜI ĐIỂM</th><th>VÍ</th><th>THEO SỔ LÚC KIỂM</th><th>KIỂM ĐẾM</th><th>CHÊNH LỆCH</th><th>GHI CHÚ</th></tr></thead>`+
+ `<tbody>${history||'<tr><td colspan="6" class="table-row-empty">Chưa có lần đối soát nào.</td></tr>'}</tbody></table></div></section>`;
+}
+
 async function renderWallets(){
   const data=await refreshWallets();
   const kindText={cash:'Tiền mặt',bank:'Ngân hàng',ewallet:'Ví điện tử'};
@@ -456,7 +501,7 @@ const walletName=id=>state.wallets.find(w=>w.id===Number(id))?.name||'Ví chính
 function walletChoices(selected=null){const chosen=selected??state.wallets.find(w=>w.is_default)?.id;return state.wallets.filter(w=>w.active||w.id===Number(chosen)).map(w=>`<option value="${w.id}" ${w.id===Number(chosen)?'selected':''}>${esc(w.name)} (${fmoney(w.balance)})</option>`).join('')}
 function walletSelect(selected=null,label='Ví tiền'){return `<label>${esc(label)}<select class="select" name="wallet_id" required>${walletChoices(selected)}</select></label>`}
 async function navigate(page){if(!PAGE_NAMES[page] || ((page==='users'||page==='audit')&&state.user.role!=='admin'))return;state.page=page;$$('[data-page]', $('#main-nav')).forEach(x=>x.classList.toggle('active',x.dataset.page===page));$('#breadcrumb-current').textContent=PAGE_NAMES[page];$('#header-month-label').textContent=monthText(state.month);$('#page-content').innerHTML='<div class="skeleton">Đang tải dữ liệu...</div>';$('#sidebar').classList.remove('open');$('#mobile-overlay').hidden=true;
- try {await refreshCategories();await refreshWallets();await refreshReminders();switch(page){case 'forecast':await renderForecast();break;case 'reports':await renderReports();break;case 'wallets':await renderWallets();break;case 'savings':await renderSavings();break;case 'stashes':await renderStashes();break;case 'recurring':await renderRecurring();break;case 'dashboard':await renderDashboard();break;case 'transactions':await renderTransactions();break;case 'receipts':await renderReceipts();break;case 'budgets':await renderBudgets();break;case 'debts':await renderDebts();break;case 'categories':await renderCategories();break;case 'settings':await renderSettings();break;case 'users':await renderUsers();break;case 'audit':await renderAudit();break;}}
+ try {await refreshCategories();await refreshWallets();await refreshReminders();switch(page){case 'forecast':await renderForecast();break;case 'reports':await renderReports();break;case 'wallets':await renderWallets();break;case 'savings':await renderSavings();break;case 'stashes':await renderStashes();break;case 'recurring':await renderRecurring();break;case 'dashboard':await renderDashboard();break;case 'transactions':await renderTransactions();break;case 'receipts':await renderReceipts();break;case 'reconciliation':await renderReconciliation();break;case 'budgets':await renderBudgets();break;case 'debts':await renderDebts();break;case 'categories':await renderCategories();break;case 'settings':await renderSettings();break;case 'users':await renderUsers();break;case 'audit':await renderAudit();break;}}
  catch(e){$('#page-content').innerHTML=`<section class="panel">${empty('Không thể tải dữ liệu',e.message)}</section>`;toast(e.message,true)}}
 function openModal(title,subtitle,body,formName,submit='Lưu thay đổi'){$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><div class="modal-header"><div><h2 id="dialog-title">${esc(title)}</h2><p>${esc(subtitle)}</p></div><button class="close-modal" data-action="close-modal" aria-label="Đóng">✕</button></div><form id="modal-form" data-form="${esc(formName)}"><div class="modal-body">${body}<div class="form-error" id="modal-error"></div></div><div class="modal-footer"><button class="btn btn-secondary" type="button" data-action="close-modal">Hủy</button><button class="btn btn-primary" type="submit">${esc(submit)}</button></div></form></section></div>`;setTimeout(()=>$('#modal-form input:not([type="hidden"])')?.focus(),0)}
 function closeModal(){if(currentReceiptPreview){URL.revokeObjectURL(currentReceiptPreview);currentReceiptPreview=null;}$('#modal-root').innerHTML=''}
@@ -508,6 +553,7 @@ async function submitForm(form){const type=form.dataset.form, raw=formObj(form);
    await api(`stashes/${raw.id}/movements`,{method:'POST',body:JSON.stringify(payload)});
    toast(raw.kind==='deposit'?'Đã dành riêng tiền; tổng tài sản giữ nguyên.':'Đã rút tiền về ví; tổng tài sản giữ nguyên.');
  }
+ else if(type==='reconciliation'){const d=await api('reconciliation/check',{method:'POST',body:JSON.stringify({wallet_id:n(raw.wallet_id),counted_balance:n(raw.counted_balance),note:raw.note||''})});toast(d.difference===0?'Đối soát khớp số dư lúc kiểm đếm.':'Đã ghi nhận chênh lệch '+fmoney(Math.abs(d.difference))+' để kiểm tra lại.');}
  else if(type==='wallet-transfer'){await api('wallet-transfers',{method:'POST',body:JSON.stringify({from_wallet_id:n(raw.from_wallet_id),to_wallet_id:n(raw.to_wallet_id),amount:n(raw.amount),occurred_on:raw.occurred_on,note:raw.note||''})});toast('Đã chuyển tiền; tổng số dư không đổi!');}
  else if(type==='recurring'){const payload={title:raw.title.trim(),amount:n(raw.amount),category_id:n(raw.category_id),wallet_id:n(raw.wallet_id),note:raw.note||'',mode:raw.mode,remind_days:n(raw.remind_days)};if(!raw.id)Object.assign(payload,{kind:raw.kind,frequency:raw.frequency,start_on:raw.start_on});await api(raw.id?`recurring/${raw.id}`:'recurring',{method:raw.id?'PUT':'POST',body:JSON.stringify(payload)});toast(raw.id?'Đã lưu lịch định kỳ.':'Đã tạo lịch định kỳ.');}
  else if(type==='totp-begin'){await showTotpQr(raw.password);return;}
@@ -564,6 +610,8 @@ async function clickAction(el){const action=el.dataset.action,id=Number(el.datas
 case 'totp-disable':openModal('Tắt xác thực hai bước','Nhập mật khẩu hiện tại và mã TOTP hoặc mã dự phòng.',`<label>Mật khẩu hiện tại<input class="input" name="password" type="password" autocomplete="current-password" required/></label><label>Mã xác thực / mã dự phòng<input class="input" name="code" maxlength="32" required autocomplete="one-time-code"/></label>`,'totp-disable','Tắt 2FA');break;
 case 'security-sessions':await listSecuritySessions();break;
 case 'security-integrity':await showSecurityIntegrity();break;
+case 'recon-reload':await navigate('reconciliation');toast('Đã tính lại báo cáo đối soát.');break;
+case 'recon-find-entry':state.month=el.dataset.date?.slice(0,7)||state.month;state.transSearch=el.dataset.title||'';state.transPage=1;await navigate('transactions');break;
 case 'security-revoke':if(confirm('Thu hồi phiên đăng nhập này?')){await api(`security/sessions/${id}`,{method:'DELETE',body:'{}'});toast('Đã thu hồi phiên.');await listSecuritySessions();}break;
 case 'security-revoke-others':if(confirm('Đăng xuất tất cả phiên khác?')){const d=await api('security/sessions/revoke-others',{method:'POST',body:'{}'});toast(`Đã thu hồi ${d.revoked} phiên.`);await listSecuritySessions();}break;
 case 'stash-add':stashModal();break;

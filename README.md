@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.22
+# MoneyFlow Local v1.0.23
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -65,7 +65,20 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 .\scripts\trust-local-https.ps1
 ```
 
-Giữ các volume Docker để không mất database và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.23 — Đối soát số dư và cảnh báo giao dịch cần xem lại
+
+Trang **Đối soát tài chính** trên menu hỗ trợ theo dõi sổ tiền MoneyFlow và những lần kiểm đếm thực tế:
+
+- **Đối soát từng ví:** nhập số dư **thực tế hiện tại** tự kiểm tra trong tiền mặt, tài khoản ngân hàng hoặc ví điện tử; MoneyFlow ghi lại đồng thời số dư **theo sổ tại thời điểm nhập**, số thực tế, khoản chênh lệch (`thực tế − theo sổ`) và ghi chú. Đây là thông tin do người dùng cung cấp, **không tự lấy số dư từ ngân hàng**.
+- **Lịch sử bất biến:** kết quả mỗi lần kiểm được lưu trong bảng PostgreSQL mới `wallet_reconciliations`; hiển thị tối đa **60 lần gần nhất**. Khi phát sinh giao dịch mới, chênh lệch kiểm đếm lịch sử **giữ nguyên theo thời điểm đã kiểm**, không so sánh lại với số dư hiện tại và không tự điều chỉnh các ví.
+- **Kiểm tra sổ chung:** so sánh tổng số dư theo từng ví với tổng số dư chung từ thu/chi/nợ/quỹ tiết kiệm; tái sử dụng các kiểm tra tính nhất quán từ mục Bảo mật: liên kết ví, sổ nợ, số dư âm, liên kết mục tiêu/quỹ. Kiểm tra này **không thể xác minh số dư thực tế** nếu chưa có kiểm đếm thủ công.
+- **Giao dịch nghi trùng:** tìm các bút toán cùng ví, ngày, loại, danh mục, số tiền và nội dung đã chuẩn hóa. Giao dịch giống nhau có thể là những lần thanh toán hoàn toàn hợp lệ; MoneyFlow chỉ đánh dấu **nghi vấn** để kiểm tra, **không xóa hoặc gộp**.
+- **Số tiền khác thường:** so sánh các giao dịch cùng loại với trung vị trong **mẫu tối đa 2.000 giao dịch mới nhất**; khi có ít nhất 6 giao dịch cùng loại, cảnh báo khoản từ **1.000.000đ** trở lên và cao ít nhất **5 lần** trung vị. Đây là **quy tắc đơn giản**, không phải phân tích AI hay bằng chứng gian lận. Nếu dữ liệu vượt 2.000 giao dịch, màn hình đánh dấu giới hạn mẫu và kết quả không bao quát toàn bộ lịch sử.
+- **Không thay đổi tài chính:** API `GET /api/reconciliation` chỉ đọc; `POST /api/reconciliation/check` chỉ thêm một kết quả kiểm đếm, không tạo giao dịch, không cộng/trừ số dư và không sửa nợ. Bảo vệ theo phiên đăng nhập, CSRF khi ghi và phân quyền ví, không cho người dùng xem/kiểm đếm ví của người khác. Đăng nhập vẫn qua HTTPS localhost.
+- **Migration:** chỉ thêm bảng `wallet_reconciliations` bằng SQLAlchemy `create_all` khi khởi chạy. Không sửa bảng thu chi/nợ/tiền để dành cũ. Khi xóa một người dùng theo quyền Admin, các bản ghi kiểm đếm thuộc người đó cũng được xóa, tránh khóa ngoại còn sót.
+- **Sử dụng:** mở **Đối soát tài chính**, chọn ví, nhập số dư bạn kiểm được, bấm **Lưu kết quả kiểm đếm**; xem mục **Kiểm tra tính nhất quán**, **Giao dịch cần xem lại** và **Lịch sử đối soát**. Nếu có sai lệch, hãy đối chiếu sao kê/chứng từ, sau đó tự chỉnh giao dịch nguồn phù hợp; không tùy tiện chỉnh số dư ban đầu để xóa chênh lệch.
 
 ## v1.0.18 — Dự báo dòng tiền và cảnh báo thiếu tiền (đọc, không ghi dữ liệu)
 
@@ -161,7 +174,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.22
+.\scripts\publish.ps1 -Version 1.0.23
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -262,6 +275,7 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | **v1.0.18** | **Dự báo dòng tiền 30/60/90 ngày từ lịch định kỳ, phân bổ trả nợ gốc theo thu nhập, phát hiện nguy cơ âm từng ví và cảnh báo kỳ quá hạn, API chỉ đọc không thay số dư.** |
 | **v1.0.19** | **Tiền tích để dành (quỹ tích lũy linh hoạt): tạo nhiều quỹ không bắt buộc mục tiêu/hạn mức, góp từ ví hoặc rút về ví, sổ góp/rút bất biến, kiểm tra số dư từng ví và phân quyền. Số dư khả dụng trừ khoản để dành, tài sản ròng cộng lại khoản này; báo cáo Excel/PDF tách riêng tích lũy và mục tiêu tiết kiệm.** |
 | **v1.0.20** | **Tích để dành tự động: mỗi quỹ có thể trích 1–100% của thu nhập sau trả nợ, hoặc số tiền cố định. Chọn ví áp dụng; ghi bút toán tự động có liên kết giao dịch gốc, hoàn tác an toàn khi sửa/xóa thu nhập, dự báo số dư sau khi dành riêng tiền. Kiểm tra migration v1.0.19 và chống nhân đôi.** |
+| **v1.0.23** | **Đối soát số dư thực tế từng ví: lưu lịch sử kiểm đếm bất biến và chênh lệch tại thời điểm kiểm, kiểm tra nhất quán sổ tiền/nợ/quỹ, phát hiện giao dịch nghi trùng hoặc số tiền lớn bất thường; không tự sửa số dư, phân quyền theo người dùng.** |
 | **v1.0.22** | **Quản lý hóa đơn & chứng từ: đính kèm tối đa 8 ảnh/PDF (≤8 MB/tệp) vào mỗi giao dịch, xem trước ảnh, tải/xóa, trang tra cứu lọc theo định dạng/tháng, phân quyền theo chủ giao dịch, lưu nội dung tệp ở Docker volume riêng, kiểm tra SHA-256 và tự xóa tệp khi xóa giao dịch hoặc người dùng.** |
 | **v1.0.21** | **Ngân sách thông minh: cảnh báo mốc 70%, 90%, 100% cho từng danh mục; dự báo mức chi cuối tháng từ tốc độ chi và lịch chi còn lại, tránh cộng trùng; gợi ý hạn mức chi/ngày, cảnh báo ngay tại Dashboard; API chỉ đọc, không migration database.** |
 

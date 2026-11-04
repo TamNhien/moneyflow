@@ -20,6 +20,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from collections import defaultdict
+from statistics import median
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from calendar import monthrange
@@ -296,6 +297,20 @@ class RecurringRun(Base):
     status: Mapped[str] = mapped_column(String(12))  # posted, skipped, deleted
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     __table_args__ = (UniqueConstraint('rule_id','due_on', name='uq_recurring_once'),)
+
+
+class WalletReconciliation(Base):
+    """Immutable manual wallet balance observation; never changes booked cash."""
+    __tablename__ = 'wallet_reconciliations'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    recorded_balance: Mapped[int] = mapped_column(BigInteger)
+    counted_balance: Mapped[int] = mapped_column(BigInteger)
+    difference: Mapped[int] = mapped_column(BigInteger)
+    note: Mapped[str] = mapped_column(String(300), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('counted_balance >= 0', name='ck_recon_counted_positive'),)
 
 
 class AuthSession(Base):
@@ -813,6 +828,12 @@ def start_session(db, response: Response, u: User, request: Request | None = Non
     return csrf
 
 
+class NewWalletReconciliation(BaseModel):
+    wallet_id: int = Field(ge=1)
+    counted_balance: int = Field(strict=True, ge=0, le=MAX_AMOUNT)
+    note: str = Field(default='', max_length=300)
+
+
 class NewUser(BaseModel):
     username: str
     email: str = Field(min_length=5,max_length=254)
@@ -1276,6 +1297,10 @@ def security_revoke_others(request:Request,db:Session=Depends(get_db)):
 @app.get('/api/security/integrity')
 def security_integrity(request:Request,db:Session=Depends(get_db)):
     u,_=session_lookup(request,db)
+    return _security_integrity_for_user(db,u)
+
+
+def _security_integrity_for_user(db:Session,u:User):
     checks=[]
     wallets=list(db.scalars(select(Wallet).where(Wallet.user_id==u.id)))
     for w in wallets:
@@ -1331,6 +1356,122 @@ def security_integrity(request:Request,db:Session=Depends(get_db)):
         if wid is None or wuid!=u.id:
             checks.append({'kind':'invalid_wallet_link','detail':f'Giao dịch #{eid} không liên kết đúng ví.'})
     return {'ok':not checks,'checked_wallets':len(wallets),'checked_entries':len(linked),'issues':checks[:100]}
+
+
+# v1.0.23: explicit human-entered balance observations, independent of bookkeeping.
+# A historical count is compared against the balance AT THE TIME it was recorded,
+# never against the current book balance after subsequent transactions.
+def reconciliation_json(row: WalletReconciliation) -> dict:
+    return {'id': row.id, 'wallet_id': row.wallet_id,
+            'recorded_balance': int(row.recorded_balance),
+            'counted_balance': int(row.counted_balance),
+            'difference': int(row.difference), 'note': row.note,
+            'created_at': row.created_at.isoformat()}
+
+
+def reconciliation_anomalies(db: Session, user_id: int) -> tuple[list[dict], bool]:
+    """Heuristic warnings on a bounded recent sample, NOT proof of incorrect entries."""
+    rows = list(db.scalars(select(Entry).where(Entry.user_id == user_id)
+        .order_by(Entry.occurred_on.desc(), Entry.id.desc()).limit(2001)))
+    limited = len(rows) > 2000
+    entries = rows[:2000]
+    grouped: dict[tuple, list[Entry]] = defaultdict(list)
+    for e in entries:
+        key = (e.wallet_id, e.occurred_on, e.kind, e.category_id,
+               int(e.amount), ' '.join(e.title.casefold().split()))
+        grouped[key].append(e)
+    result = []
+    for group in grouped.values():
+        if len(group) > 1:
+            first = group[0]
+            result.append({'type': 'duplicate_candidate', 'severity': 'review',
+                'title': 'Giao dịch có dấu hiệu trùng',
+                'description': f'{len(group)} bút toán cùng ngày, ví, danh mục, nội dung và số tiền. Có thể là những lần thanh toán hợp lệ.',
+                'entry_ids': [e.id for e in group[:12]], 'occurred_on': first.occurred_on.isoformat(),
+                'entry_title': first.title, 'amount': int(first.amount),
+                'wallet_id': first.wallet_id})
+    # Compare against same-kind values in the sample. Do not mark a transaction
+    # as outlier unless enough peers exist and its magnitude is substantial.
+    by_kind = defaultdict(list)
+    for e in entries:
+        by_kind[e.kind].append(int(e.amount))
+    for e in entries:
+        peers = by_kind[e.kind]
+        if len(peers) < 6:
+            continue
+        baseline = median(peers)
+        if e.amount >= max(1_000_000, 5 * baseline):
+            result.append({'type': 'large_amount', 'severity': 'review',
+                'title': 'Số tiền lớn so với giao dịch cùng loại',
+                'description': 'Giá trị cao ít nhất 5 lần mức trung vị trong dữ liệu đang xét. Hãy kiểm tra chứng từ nếu cần.',
+                'entry_ids': [e.id], 'occurred_on': e.occurred_on.isoformat(),
+                'entry_title': e.title, 'amount': int(e.amount), 'wallet_id': e.wallet_id})
+    result.sort(key=lambda item: (item['occurred_on'], item['entry_ids'][0]), reverse=True)
+    return result[:50], limited
+
+
+@app.get('/api/reconciliation')
+def reconciliation_overview(response: Response, u: User = Depends(current), db: Session = Depends(get_db)):
+    response.headers['Cache-Control'] = 'no-store'
+    wallets = list(db.scalars(select(Wallet).where(Wallet.user_id == u.id).order_by(Wallet.id)))
+    checks = list(db.scalars(select(WalletReconciliation).where(
+        WalletReconciliation.user_id == u.id).order_by(
+        WalletReconciliation.created_at.desc(), WalletReconciliation.id.desc()).limit(60)))
+    # Fetch the latest check for EACH wallet even when the 60 newest history
+    # records all belong to a single wallet.
+    last_ids = select(func.max(WalletReconciliation.id)).where(
+        WalletReconciliation.user_id == u.id).group_by(WalletReconciliation.wallet_id)
+    latest = {row.wallet_id: row for row in db.scalars(select(WalletReconciliation)
+        .where(WalletReconciliation.id.in_(last_ids)))}
+    wallet_rows = []
+    for w in wallets:
+        balance = wallet_balance(db, w)
+        recent = latest.get(w.id)
+        wallet_rows.append({'id': w.id, 'name': w.name, 'kind': w.kind, 'active': w.active,
+                            'book_balance': balance,
+                            'last_check': reconciliation_json(recent) if recent else None})
+    ledger_total = current_balance(db, u.id)[0]
+    wallet_total = sum(w['book_balance'] for w in wallet_rows)
+    integrity = security_integrity_from_db(db, u.id)
+    # Collect problems in an independent scope; NEVER fix balances automatically.
+    issues = list(integrity['issues'])
+    if ledger_total != wallet_total:
+        issues.insert(0, {'kind': 'ledger_difference',
+            'detail': f'Tổng sổ ví ({wallet_total:,}đ) khác tổng sổ chung ({ledger_total:,}đ).'})
+    anomalies, limited = reconciliation_anomalies(db, u.id)
+    return {'as_of': utcnow().isoformat(), 'wallets': wallet_rows,
+            'summary': {'wallet_count': len(wallet_rows), 'book_total': wallet_total,
+                        'checked_wallets': sum(w['last_check'] is not None for w in wallet_rows),
+                        'latest_discrepancies': sum(w['last_check'] is not None and w['last_check']['difference'] != 0 for w in wallet_rows),
+                        'integrity_issues': len(issues), 'anomaly_candidates': len(anomalies)},
+            'ledger_total': ledger_total, 'integrity_issues': issues[:50],
+            'anomalies': anomalies, 'sample_limited': limited,
+            'checks': [reconciliation_json(row) for row in checks]}
+
+
+@app.post('/api/reconciliation/check')
+def create_reconciliation(data: NewWalletReconciliation, u: User = Depends(current),
+                          db: Session = Depends(get_db)):
+    wallet = wallet_for(db, u.id, data.wallet_id)
+    # Preserve even a negative book balance as evidence of a detected error.
+    recorded = wallet_balance(db, wallet)
+    counted = data.counted_balance
+    row = WalletReconciliation(user_id=u.id, wallet_id=wallet.id,
+          recorded_balance=recorded, counted_balance=counted, difference=counted-recorded,
+          note=data.note.strip())
+    db.add(row)
+    log(db, u.id, 'wallet_reconciled', f'wallet={wallet.id}; difference={counted-recorded}')
+    db.commit()
+    return reconciliation_json(row)
+
+
+def security_integrity_from_db(db: Session, user_id: int) -> dict:
+    """Cross-ledger integrity checks already used by account security diagnostics."""
+    # Avoid duplicating integrity formulas across two APIs. Execute the existing
+    # read-only check via its known user, without modifying the financial ledger.
+    class _Actor:
+        id = user_id
+    return _security_integrity_for_user(db, _Actor())
 
 
 @app.get('/api/me')
@@ -2890,6 +3031,7 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
         select(Receipt).where(Receipt.user_id == target.id)).all()]
     db.query(Receipt).filter(Receipt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
+    db.query(WalletReconciliation).filter(WalletReconciliation.user_id==target.id).delete(synchronize_session=False)
     db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsMovement).filter(SavingsMovement.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsGoal).filter(SavingsGoal.user_id==target.id).delete(synchronize_session=False)

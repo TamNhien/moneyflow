@@ -58,6 +58,10 @@ const responses = {
   'savings': {items: [{id:1,name:'Quỹ dự phòng',target_amount:200000,saved_amount:25000,remaining_amount:175000,progress_pct:12.5,complete:false,due_date:null,note:'Tích lũy',created_at:'2026-11-01'}],total_saved:25000,total_targets:200000,history:[]},
   'dashboard': {...dashboard, budget_alerts:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,status:'critical',at_risk:true,projected_over:500}]},
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
+  'reconciliation': {as_of:'2026-11-04T10:00:00Z', summary:{wallet_count:1,book_total:100000,checked_wallets:1,latest_discrepancies:0,integrity_issues:0,anomaly_candidates:1},ledger_total:100000, integrity_issues:[],sample_limited:false,
+    wallets:[{id:1,name:'Ví chính',kind:'cash',active:true,book_balance:100000,last_check:{id:2,wallet_id:1,recorded_balance:100000,counted_balance:100000,difference:0,note:'Kiem tra',created_at:'2026-11-04T09:00:00Z'}}],
+    anomalies:[{type:'duplicate_candidate',title:'Giao dịch có dấu hiệu trùng',description:'Hai giao dịch cùng ngày',entry_title:'Ăn trưa',occurred_on:'2026-11-02',entry_ids:[7,8],amount:25000,wallet_id:1}],
+    checks:[{id:2,wallet_id:1,recorded_balance:100000,counted_balance:100000,difference:0,note:'Kiem tra',created_at:'2026-11-04T09:00:00Z'}]},
   'receipts':{items:[{id:5,entry_id:7,name:'hoa-don.png',mime_type:'image/png',size_bytes:2048,entry_title:'Ăn trưa',entry_kind:'expense',entry_amount:25000,occurred_on:'2026-11-02',created_at:'2026-11-04T09:00:00Z'}],total:1,page:1,pages:1},
   'transactions/7/receipts':{items:[{id:5,entry_id:7,name:'hoa-don.png',mime_type:'image/png',size_bytes:2048,created_at:'2026-11-04T09:00:00Z'}],max_files:8,max_bytes:8388608},
   'budgets': [], 'budgets/insights':{month:'2026-11',is_current_month:true,as_of:'2026-11-04',days_remaining:26,summary:{count:1,budget_total:1000,spent_total:950,critical_count:1,warning_count:0,at_risk_count:1},items:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,spent_percent:95,remaining:50,over_by:0,status:'critical',projected_spent:1400,projected_over:400,at_risk:true,scheduled_remaining:200,scheduled_count:1,safe_daily:0}],alerts:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,status:'critical',at_risk:true,projected_over:400}]}, 'debts': debtData, 'users': [fakeUser],
@@ -92,7 +96,7 @@ assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup
 
 const pages = [
   ['dashboard', 'Xin chào'], ['forecast','Dự báo dòng tiền'], ['savings', 'Mục tiêu tiết kiệm'], ['stashes', 'Tiền tích để dành'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
-  ['transactions', 'Quản lý giao dịch'], ['receipts', 'Hóa đơn &amp; chứng từ'], ['budgets', 'Ngân sách thông minh'],
+  ['transactions', 'Quản lý giao dịch'], ['receipts', 'Hóa đơn &amp; chứng từ'], ['reconciliation', 'Đối soát &amp; kiểm tra tài chính'], ['budgets', 'Ngân sách thông minh'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
   ['audit', 'Nhật ký hoạt động'],
