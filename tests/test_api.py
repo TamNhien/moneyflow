@@ -951,3 +951,120 @@ def test_stashes_user_isolation(client):
         assert auth_post(member,f'/api/stashes/{fid}',{'name':'Đổi tên quỹ lạ','note':''},csrf=member_csrf,method='put').status_code==404
         assert auth_post(member,f'/api/stashes/{fid}/movements',{'kind':'deposit','wallet_id':1,'amount':100,'occurred_on':'2026-11-03'},csrf=member_csrf).status_code in (404,422)
         assert auth_post(member,f'/api/stashes/{fid}',csrf=member_csrf,method='delete').status_code==404
+
+
+def test_auto_stash_percentage_fixed_after_debt_and_reversal(client):
+    """v1.0.20: reserve net income, not gross; preserve assets and reversibility."""
+    login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert login.status_code == 200, login.text
+    r=auth_post(client,'/api/users',credentials('stashauto20'),csrf=login.json()['csrf_token'])
+    assert r.status_code == 200,r.text
+    r=auth_post(client,'/api/login',{'username':'stashauto20','password':'SecurePassword@12345'})
+    assert r.status_code == 200,r.text
+    csrf=r.json()['csrf_token']
+    cats=client.get('/api/categories').json()
+    income_id=next(x['id'] for x in cats if x['kind']=='income')
+    expense_id=next(x['id'] for x in cats if x['kind']=='expense')
+    wid=client.get('/api/wallets').json()['items'][0]['id']
+    daily=__import__('datetime').date.today().isoformat()
+    wrong=auth_post(client,'/api/stashes',{'name':'Sai %','auto_mode':'percent','auto_value':101},csrf=csrf)
+    assert wrong.status_code==422
+    off=auth_post(client,'/api/stashes',{'name':'Sai off','auto_mode':'off','auto_value':500},csrf=csrf)
+    assert off.status_code==422
+    w=auth_post(client,'/api/stashes',{'name':'Sai ví','auto_mode':'fixed','auto_value':1,'auto_wallet_id':9999999},csrf=csrf)
+    assert w.status_code==422
+    percent=auth_post(client,'/api/stashes',{'name':'10 phần trăm','auto_mode':'percent','auto_value':20,'auto_wallet_id':wid},csrf=csrf)
+    assert percent.status_code==200,percent.text
+    fixed=auth_post(client,'/api/stashes',{'name':'Cố định 300','auto_mode':'fixed','auto_value':300},csrf=csrf)
+    assert fixed.status_code==200,fixed.text
+    percent_id,fixed_id=percent.json()['id'],fixed.json()['id']
+    loan=auth_post(client,'/api/debts',{'name':'Nợ trả trước','principal':400,'direction':'payable'},csrf=csrf)
+    assert loan.status_code==200,loan.text
+    entry={'title':'Lương mới','kind':'income','amount':1000,'category_id':income_id,
+           'wallet_id':wid,'occurred_on':daily,'note':''}
+    added=auth_post(client,'/api/transactions',entry,csrf=csrf)
+    assert added.status_code==200,added.text
+    eid=added.json()['id']
+    assert added.json()['debt_paid']==400
+    assert added.json()['auto_saved']==420  # 20% of 600 (120) + fixed 300
+    d=client.get('/api/dashboard?month='+daily[:7]).json()
+    assert (d['balance'],d['stash_reserved'],d['total_assets'])==(180,420,600)
+    assert client.get('/api/debts').json()['total_remaining']==0
+    funds=client.get('/api/stashes').json()
+    byid={f['id']:f for f in funds['items']}
+    assert byid[percent_id]['saved_amount']==120
+    assert byid[fixed_id]['saved_amount']==300
+    history=funds['history']
+    assert len(history)==2 and all(m['source']=='auto' and m['source_entry_id']==eid for m in history)
+    # A small income cannot cause an overdraft: percentage of its net, fixed capped.
+    small=auth_post(client,'/api/transactions',{**entry,'amount':100},csrf=csrf)
+    assert small.status_code==200,small.text
+    assert small.json()['auto_saved']==100
+    assert client.get('/api/dashboard?month='+daily[:7]).json()['balance']==180
+    # Reversing an auto-funded income restores the allocation; no new expense.
+    assert auth_post(client,f'/api/transactions/{small.json()["id"]}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/stashes').json()['total_saved']==420
+    edited=auth_post(client,f'/api/transactions/{eid}',{**entry,'amount':600},method='put',csrf=csrf)
+    assert edited.status_code==200,edited.text
+    assert (edited.json()['debt_paid'],edited.json()['auto_saved'])==(400,200)
+    # fixed 300 is capped to remaining 160 after 20% of net 200 = 40.
+    assert client.get('/api/dashboard?month='+daily[:7]).json()['balance']==0
+    # Withdrawing auto savings prevents deleting the funding income if balance is too small.
+    movement={'kind':'withdraw','wallet_id':wid,'amount':100,'occurred_on':daily}
+    r=auth_post(client,f'/api/stashes/{fixed_id}/movements',movement,csrf=csrf)
+    assert r.status_code==200,r.text
+    blocked=auth_post(client,f'/api/transactions/{eid}',csrf=csrf,method='delete')
+    assert blocked.status_code==409,blocked.text
+    assert client.get('/api/debts').json()['total_remaining']==0  # rollback atomic
+    # Return the withdrawn money to the fund and delete the source income.
+    movement['kind']='deposit'
+    assert auth_post(client,f'/api/stashes/{fixed_id}/movements',movement,csrf=csrf).status_code==200
+    assert auth_post(client,f'/api/transactions/{eid}',csrf=csrf,method='delete').status_code==200
+    final=client.get('/api/dashboard?month='+daily[:7]).json()
+    assert (final['balance'],final['stash_reserved'],final['total_assets'])==(0,0,0)
+    assert client.get('/api/debts').json()['total_remaining']==400
+    # Scope rule to a particular wallet; a different wallet receives no auto deposit.
+    bank=auth_post(client,'/api/wallets',{'name':'Ngân hàng khác','kind':'bank','opening_balance':0},csrf=csrf)
+    assert bank.status_code==200,bank.text
+    other_id=bank.json()['id']
+    assert auth_post(client,f'/api/stashes/{fixed_id}',{'name':'Cố định 300','auto_mode':'off','auto_value':0},csrf=csrf,method='put').status_code==200
+    extra=auth_post(client,'/api/transactions',{**entry,'amount':500,'wallet_id':other_id},csrf=csrf)
+    assert extra.status_code==200 and extra.json()['auto_saved']==0
+    # No additional ledger rows from auto reserve when income lands in another wallet.
+    assert client.get('/api/stashes').json()['total_saved']==0
+    # User isolation still enforced.
+    owner2=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert owner2.status_code==200
+    cross=auth_post(client,f'/api/stashes/{percent_id}',{'name':'Không thuộc sở hữu','auto_mode':'percent','auto_value':10},csrf=owner2.json()['csrf_token'],method='put')
+    assert cross.status_code==404
+
+
+def test_auto_stash_recurring_income_and_forecast(client):
+    admin=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert admin.status_code==200,admin.text
+    made=auth_post(client,'/api/users',credentials('stashrec20'),csrf=admin.json()['csrf_token'])
+    assert made.status_code==200,made.text
+    login=auth_post(client,'/api/login',{'username':'stashrec20','password':'SecurePassword@12345'})
+    assert login.status_code==200,login.text
+    csrf=login.json()['csrf_token']
+    wid=client.get('/api/wallets').json()['items'][0]['id']
+    inc=next(c['id'] for c in client.get('/api/categories').json() if c['kind']=='income')
+    r=auth_post(client,'/api/stashes',{'name':'Dành 25%','auto_mode':'percent','auto_value':25},csrf=csrf)
+    assert r.status_code==200,r.text
+    due=__import__('datetime').date.today()
+    rule={'title':'Lương định kỳ','kind':'income','amount':2000,'category_id':inc,
+          'wallet_id':wid,'start_on':due.isoformat(),'frequency':'monthly','mode':'manual','remind_days':3}
+    made=auth_post(client,'/api/recurring',rule,csrf=csrf)
+    assert made.status_code==200,made.text
+    rule_id=made.json()['id']
+    outcome=auth_post(client,f'/api/recurring/{rule_id}/confirm',csrf=csrf)
+    assert outcome.status_code==200,outcome.text
+    assert outcome.json()['auto_saved']==500
+    assert auth_post(client,f'/api/recurring/{rule_id}/confirm',csrf=csrf).status_code==409
+    assert client.get('/api/stashes').json()['total_saved']==500
+    assert client.get('/api/dashboard?month='+due.isoformat()[:7]).json()['balance']==1500
+    before=client.get('/api/transactions').json()['total']
+    forecast=client.get('/api/forecast?days=30')
+    assert forecast.status_code==200,forecast.text
+    assert forecast.json()['stash_allocated']>=0
+    assert client.get('/api/transactions').json()['total']==before

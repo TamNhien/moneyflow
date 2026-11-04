@@ -96,3 +96,34 @@ with TestClient(app):
     for _ in range(2):
         result=subprocess.run([sys.executable,'-c',code],cwd=root,env=env,capture_output=True,text=True,timeout=30)
         assert result.returncode==0,result.stdout+'\n'+result.stderr
+
+
+def test_v119_stash_auto_columns_are_added_without_resetting_funds(tmp_path):
+    """v1.0.20 upgrade retains old money movements and remains idempotent."""
+    db_file=tmp_path/'v119_existing.sqlite'
+    con=sqlite3.connect(db_file)
+    con.executescript('''
+      CREATE TABLE stash_funds (id INTEGER PRIMARY KEY,user_id INTEGER,name VARCHAR(120),note VARCHAR(300),created_at DATETIME);
+      CREATE TABLE stash_movements (id INTEGER PRIMARY KEY,user_id INTEGER,fund_id INTEGER,wallet_id INTEGER,kind VARCHAR(10),amount BIGINT,occurred_on DATE,note VARCHAR(300),created_at DATETIME);
+      INSERT INTO stash_funds VALUES(7,1,'Quỹ cũ','Dữ liệu gốc','2026-11-02');
+      INSERT INTO stash_movements VALUES(11,1,7,1,'deposit',300000,'2026-11-02','Trước khi nâng cấp','2026-11-02');
+    ''')
+    con.commit();con.close()
+    root=Path(__file__).resolve().parents[1]
+    env={**os.environ,'DATABASE_URL':'sqlite:///'+str(db_file),'PYTHONPATH':str(root)}
+    code='''from fastapi.testclient import TestClient
+from backend.app import app, SessionLocal, StashFund, StashMovement
+with TestClient(app):
+ with SessionLocal() as db:
+  fund=db.get(StashFund,7)
+  assert fund.name=='Quỹ cũ' and fund.auto_mode=='off' and fund.auto_value==0 and fund.auto_wallet_id is None
+  m=db.get(StashMovement,11)
+  assert m.amount==300000 and m.source_entry_id is None
+'''
+    for _ in range(2):
+        result=subprocess.run([sys.executable,'-c',code],cwd=root,env=env,capture_output=True,text=True,timeout=30)
+        assert result.returncode==0,result.stdout+'\n'+result.stderr
+    with sqlite3.connect(db_file) as con:
+        assert con.execute('SELECT COUNT(*) FROM stash_movements').fetchone()[0]==1
+        assert con.execute('SELECT COUNT(*) FROM stash_funds').fetchone()[0]==1
+        assert con.execute("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='uq_stash_auto_entry_fund'").fetchone()[0]==1

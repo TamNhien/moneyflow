@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.19
+# MoneyFlow Local v1.0.20
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành linh hoạt**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -160,7 +160,7 @@ Cần cấu hình SMTP và kết nối Internet để gửi email; các thao tá
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
 Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
-.\scripts\publish.ps1 -Version 1.0.19
+.\scripts\publish.ps1 -Version 1.0.20
 ```
 
 Từ lần phát hành kế tiếp, khi phiên bản trước đã được phát hành đầy đủ, có thể chạy `.\scripts\publish.ps1` để tăng patch tự động. GitHub Actions đặt trong `.github/workflows/ci.yml` và `release.yml`.
@@ -173,7 +173,7 @@ Sau khi push tag phiên bản, `publish.ps1` tự đợi workflow `release.yml` 
 
 ```powershell
 cd D:\LienThongDH\DoAn\moneyflow
-.\scripts\publish.ps1 -Version 1.0.19
+.\scripts\publish.ps1 -Version 1.0.20
 ```
 
 Kiểm tra lại một tag **đã được đẩy**, không cần build hoặc push lại:
@@ -260,9 +260,22 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 | **v1.0.17** | **Mục tiêu tiết kiệm: góp/rút từ các ví, quỹ dành riêng không tính thu chi, tiến độ và hạn dự kiến, quản lý nhiều mục tiêu, phân quyền, kiểm tra sổ tiền, báo cáo tài sản ròng tính cả tiền tiết kiệm.** |
 | **v1.0.18** | **Dự báo dòng tiền 30/60/90 ngày từ lịch định kỳ, phân bổ trả nợ gốc theo thu nhập, phát hiện nguy cơ âm từng ví và cảnh báo kỳ quá hạn, API chỉ đọc không thay số dư.** |
 | **v1.0.19** | **Tiền tích để dành (quỹ tích lũy linh hoạt): tạo nhiều quỹ không bắt buộc mục tiêu/hạn mức, góp từ ví hoặc rút về ví, sổ góp/rút bất biến, kiểm tra số dư từng ví và phân quyền. Số dư khả dụng trừ khoản để dành, tài sản ròng cộng lại khoản này; báo cáo Excel/PDF tách riêng tích lũy và mục tiêu tiết kiệm.** |
+| **v1.0.20** | **Tích để dành tự động: mỗi quỹ có thể trích 1–100% của thu nhập sau trả nợ, hoặc số tiền cố định. Chọn ví áp dụng; ghi bút toán tự động có liên kết giao dịch gốc, hoàn tác an toàn khi sửa/xóa thu nhập, dự báo số dư sau khi dành riêng tiền. Kiểm tra migration v1.0.19 và chống nhân đôi.** |
 
 Các phiên bản sau cập nhật `VERSION` và ghi chú phát hành trong chính `README.md`, không tạo `CHANGELOG.md` hay các file hướng dẫn theo phiên bản.
 
 ## Tiền tích để dành (v1.0.19)
 
 Mở **Tiền tích để dành** trên menu. Tạo quỹ linh hoạt (ví dụ Tiền tích để dành, Quỹ khẩn cấp, Tiền dự phòng); dùng **Góp tiền** hoặc **Rút về ví**. Các khoản này chỉ là điều chuyển nội bộ trên sổ MoneyFlow, không chuyển tiền ngân hàng thật, không phát sinh thu/chi và không có lãi mặc định. Tiền trong các quỹ cộng với tiền tại mục tiêu tiết kiệm đều được tính trong tổng tài sản; số dư khả dụng ví đã loại trừ khoản được giữ riêng. Quỹ đã có lịch sử không thể xóa để duy trì khả năng đối soát. Bảng mới `stash_funds` và `stash_movements` được tạo qua metadata khi ứng dụng khởi động; không cần xóa dữ liệu cũ.
+
+
+## v1.0.20 — Tự động tích để dành từ mỗi khoản thu
+
+- Mở **Tiền tích để dành** → **Tạo quỹ để dành** hoặc **Sửa** quỹ đang có. Ở mục **Tự động tích lũy khi nhận thu nhập**, chọn **Tắt**, **Theo % thu nhập sau trả nợ** (từ **1–100%**) hoặc **Số tiền cố định (VNĐ)**. Có thể chọn chỉ áp dụng cho một ví nhận tiền hoặc tất cả các ví. **Mặc định Tắt** để không tự trích tiền khi người dùng chưa chủ động bật.
+- Khi thêm khoản **Thu nhập mới** (kể cả xác nhận/giao dịch tự động từ lịch định kỳ), MoneyFlow ưu tiên trả **nợ gốc phải trả** như trước. Từ phần thu nhập còn lại, hệ thống áp dụng các quỹ đang bật theo **thứ tự quỹ được tạo**, tính tỷ lệ trên phần thu nhập sau trả nợ (không tính trên tổng số tiền trong ví), sau đó giới hạn theo số còn chưa được phân bổ. Mức cố định cũng chỉ trích tối đa số tiền còn lại. Không trích từ tiền gốc đã có, khoản chuyển giữa ví, tiền thu hồi nợ hoặc khoản chi.
+- Ví dụ có lương mới **10.000.000đ**, trừ nợ gốc **2.000.000đ** → thu nhập sau nợ còn **8.000.000đ**. Quỹ A cài **20%** được **1.600.000đ**, quỹ B cố định **1.000.000đ** được **1.000.000đ**; số tiền thực cộng thêm vào ví là **5.400.000đ**. Tiền chuyển vào các quỹ vẫn nằm trong tổng tài sản và **không được tính là chi tiêu**.
+- Lịch sử quỹ ghi rõ **Tự động tích lũy** hay **Thủ công**, có liên kết nội bộ tới giao dịch thu nguồn để ngăn bút toán trùng (chỉ một bút toán tự động/quỹ/giao dịch). **Chỉ các khoản thu được ghi sau khi bật quy tắc** mới áp dụng tự động; tiền thu nhập đã lưu trước đó không bị trích hồi tố.
+- Khi sửa hoặc xóa khoản thu có tiền tích tự động, chương trình chỉ hoàn tác các bút toán tự động của chính khoản thu đó, phục hồi nợ gốc và đánh giá lại quy tắc. Nếu đã rút tiền từ quỹ khiến không đủ để hoàn tác, hệ thống **chặn thao tác** và giữ nguyên toàn bộ số dư; cần góp hoàn tiền vào quỹ trước.
+- Trang **Dự báo dòng tiền** bổ sung chỉ tiêu **Dự kiến để dành**, tính trên các khoản thu định kỳ giả định và dự báo **số dư khả dụng sau trừ nợ, tích lũy**. Dự báo chỉ đọc, không tự tạo bút toán. Báo cáo Excel/PDF hiện có tiếp tục ghi các khoản quỹ như **tài sản dành riêng**, không cộng hai lần vào thu/chi.
+- Database **không thêm bảng mới**: bổ sung `auto_mode`, `auto_value`, `auto_wallet_id` vào `stash_funds` và `source_entry_id` vào `stash_movements`, thêm unique partial index cho (quỹ, giao dịch thu). Migration PostgreSQL/SQLite chạy **idempotent** và giữ quỹ/lịch sử từ v1.0.19. Quy tắc cũ tự mặc định `off`.
+- Tài khoản và số dư hiện tại vẫn nằm trong PostgreSQL Docker cũ; không xóa volume. Trên Windows, dùng `scripts/run.ps1` để tự mở Docker Desktop → test/build/chạy; `scripts/publish.ps1 -Version 1.0.20` để phát hành và xác minh GitHub Release.

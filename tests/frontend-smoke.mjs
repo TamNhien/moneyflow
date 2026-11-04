@@ -54,7 +54,7 @@ const responses = {
   'me': { user: fakeUser, csrf_token: 'csrf-for-test' },
   'categories': categories,
   'wallets': { items: [wallet], transfers: [], total_balance: wallet.balance },
-  'stashes': {items:[{id:1,name:'Tiền tích để dành',note:'Quỹ linh hoạt',saved_amount:50000,created_at:'2026-11-03'}],total_saved:50000,history:[]},
+  'stashes': {items:[{id:1,name:'Tiền tích để dành',note:'Quỹ linh hoạt',auto_mode:'percent',auto_value:10,auto_wallet_id:1,saved_amount:50000,created_at:'2026-11-03'}],total_saved:50000,history:[]},
   'savings': {items: [{id:1,name:'Quỹ dự phòng',target_amount:200000,saved_amount:25000,remaining_amount:175000,progress_pct:12.5,complete:false,due_date:null,note:'Tích lũy',created_at:'2026-11-01'}],total_saved:25000,total_targets:200000,history:[]},
   'dashboard': dashboard,
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
@@ -155,8 +155,12 @@ console.log('Forecast smoke PASS: 30-day projection cards, SVG chart and wallet 
 await runInContext('navigate("stashes")',context);
 assert.match(element('#page-content').innerHTML,/Tiền tích để dành/);
 assert.match(element('#page-content').innerHTML,/data-action="stash-deposit"/);
+assert.match(element('#page-content').innerHTML, /Tự góp 10% thu nhập/);
 assert.match(element('#page-content').innerHTML,/data-action="stash-withdraw"/);
 await runInContext('stashModal(state.stashData.items[0])',context);
+assert.match(element('#modal-root').innerHTML, /name="auto_mode"/);
+assert.match(element('#modal-root').innerHTML, /name="auto_value"/);
+assert.match(element('#modal-root').innerHTML, /name="auto_wallet_id"/);
 assert.match(element('#modal-root').innerHTML,/Sửa quỹ tích lũy/);
 await runInContext('stashMovementModal(state.stashData.items[0], "deposit")',context);
 assert.match(element('#modal-root').innerHTML,/Góp vào tiền để dành/);

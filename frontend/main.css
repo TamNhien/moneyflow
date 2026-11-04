@@ -406,3 +406,11 @@ select option { background: #1d2b47; color: #f3f6ff; }
 .forecast-panel{margin-bottom:20px}.forecast-chart{width:100%;padding:10px 5px 5px;min-height:245px}.forecast-chart svg{width:100%;height:270px;display:block}.forecast-axis{display:flex;justify-content:space-between;color:#8898b5;font-size:10px;margin:7px 28px 0}
 .forecast-columns{display:grid;grid-template-columns:1.2fr 1fr;gap:18px;margin-bottom:20px}.forecast-wallets{display:grid;gap:10px}.forecast-wallet{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:13px 15px;background:#1b2942;border:1px solid #344460;border-radius:12px}.forecast-wallet strong{display:block;color:#e7ecff;font-size:12px}.forecast-wallet small{display:block;color:#94a4c5;margin-top:6px;font-size:10px}.forecast-wallet-numbers{text-align:right}.forecast-wallet-numbers span{font-size:11px;color:#b8c7e6}.forecast-wallet-numbers b{color:#f6f6ff}.forecast-wallet-numbers em{display:block;font-size:10px;font-style:normal;color:#ff9fb1;margin-top:6px}.forecast-assumptions{margin:0;padding:0 0 0 18px;color:#acbbd5;font-size:12px;line-height:1.75}.forecast-assumptions li{margin:5px 0}.forecast-table-note{display:block;font-size:10px;color:#93a3c1;margin-top:4px}.forecast-truncated{font-size:11px;color:#c8b9f2;margin:14px}.forecast-panel .table-wrap{max-height:460px;overflow:auto}
 @media(max-width:1180px){.forecast-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:840px){.forecast-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.forecast-columns{grid-template-columns:1fr}.forecast-wallet{flex-wrap:wrap}.forecast-wallet-numbers{text-align:left}}@media(max-width:480px){.forecast-kpis{grid-template-columns:1fr}.forecast-chart svg{height:205px}.forecast-controls{align-items:stretch}.forecast-controls label{width:100%;justify-content:space-between}}
+
+/* v1.0.20 – automatic stash reservation controls */
+.stash-auto-status { display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 6px; }
+.stash-auto-status small { font-size:12px;color:#9baaca; }
+.stash-rule-section {padding:16px 14px;margin:16px 0;border:1px solid #394967;border-radius:14px;background:#192843;}
+.stash-rule-section h3 {font-size:14px;color:#e5edff;margin:0 0 14px;font-weight:700;}
+.stash-rule-section label {display:block;margin:0 0 11px;}
+.stash-rule-section .simple-info {margin-top:12px;}

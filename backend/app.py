@@ -143,22 +143,26 @@ class SavingsMovement(Base):
 
 
 class StashFund(Base):
-    """Money set aside without a target/limit. Separate from goal-based savings."""
+    """Flexible reserved funds; optional auto-reserve rules on incoming money."""
     __tablename__ = 'stash_funds'
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     name: Mapped[str] = mapped_column(String(120))
     note: Mapped[str] = mapped_column(String(300), default='')
+    auto_mode: Mapped[str] = mapped_column(String(10), default='off', server_default='off')
+    auto_value: Mapped[int] = mapped_column(BigInteger, default=0, server_default='0')
+    auto_wallet_id: Mapped[int | None] = mapped_column(ForeignKey('wallets.id'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class StashMovement(Base):
-    """Immutable deposits/withdrawals. Never recorded as income or expense."""
+    """Immutable deposit/withdrawal ledger; auto allocation references its income entry."""
     __tablename__ = 'stash_movements'
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     fund_id: Mapped[int] = mapped_column(ForeignKey('stash_funds.id'), index=True)
     wallet_id: Mapped[int] = mapped_column(ForeignKey('wallets.id'), index=True)
+    source_entry_id: Mapped[int | None] = mapped_column(ForeignKey('entries.id'), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(10))
     amount: Mapped[int] = mapped_column(BigInteger)
     occurred_on: Mapped[date] = mapped_column(Date, index=True)
@@ -345,6 +349,11 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE debts ADD COLUMN IF NOT EXISTS annual_rate_bps INTEGER NOT NULL DEFAULT 0'))
             conn.execute(text('ALTER TABLE debts ADD COLUMN IF NOT EXISTS installment_count INTEGER NOT NULL DEFAULT 1'))
             conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS interest_amount BIGINT NOT NULL DEFAULT 0'))
+            conn.execute(text("ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_mode VARCHAR(10) NOT NULL DEFAULT 'off'"))
+            conn.execute(text('ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_value BIGINT NOT NULL DEFAULT 0'))
+            conn.execute(text('ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_wallet_id INTEGER REFERENCES wallets(id)'))
+            conn.execute(text('ALTER TABLE stash_movements ADD COLUMN IF NOT EXISTS source_entry_id INTEGER REFERENCES entries(id)'))
+            conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_stash_auto_entry_fund ON stash_movements (fund_id, source_entry_id) WHERE source_entry_id IS NOT NULL'))
         else:
             columns = {row[1] for row in conn.execute(text('PRAGMA table_info(users)'))}
             for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300'),('totp_secret','TEXT'),('totp_pending','TEXT'),('totp_pending_until','DATETIME'),('totp_last_step','INTEGER NOT NULL DEFAULT -1'),('totp_failed_attempts','INTEGER NOT NULL DEFAULT 0'),('totp_locked_until','DATETIME')]:
@@ -368,6 +377,17 @@ async def lifespan(_app: FastAPI):
                 for col, definition in columns:
                     if col not in existing:
                         conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {definition}'))
+            for table, columns in {
+                'stash_funds': [('auto_mode', "VARCHAR(10) NOT NULL DEFAULT 'off'"),
+                                ('auto_value', 'BIGINT NOT NULL DEFAULT 0'),
+                                ('auto_wallet_id', 'INTEGER REFERENCES wallets(id)')],
+                'stash_movements': [('source_entry_id', 'INTEGER REFERENCES entries(id)')],
+            }.items():
+                existing = {row[1] for row in conn.execute(text(f'PRAGMA table_info({table})'))}
+                for col, definition in columns:
+                    if col not in existing:
+                        conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {definition}'))
+            conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_stash_auto_entry_fund ON stash_movements (fund_id, source_entry_id) WHERE source_entry_id IS NOT NULL'))
     # Idempotent upgrade: create exactly one default wallet for each legacy account.
     # Existing opening_balance, entries and debt payments are reassigned, not copied.
     with SessionLocal.begin() as db:
@@ -667,6 +687,63 @@ def allocate_income_to_debts(db, user_id, entry):
     return paid
 
 
+def allocate_income_to_stashes(db: Session, user_id: int, entry: Entry, debt_paid: int = 0) -> int:
+    """Reserve only remaining incoming cash *after* principal repayment.
+
+    Fund rules run in deterministic creation order. Percentage is calculated on
+    the original net income (gross minus repaid principal); amounts are capped
+    by the unallocated remainder. All movements are part of the entry transaction.
+    """
+    if entry.kind != 'income':
+        return 0
+    net_income = max(0, int(entry.amount) - int(debt_paid))
+    remaining = net_income
+    total = 0
+    funds = list(db.scalars(select(StashFund).where(
+        StashFund.user_id == user_id, StashFund.auto_mode != 'off'
+    ).order_by(StashFund.id).with_for_update()))
+    for fund in funds:
+        if remaining <= 0:
+            break
+        if fund.auto_wallet_id is not None and fund.auto_wallet_id != entry.wallet_id:
+            continue
+        # Unique (fund, income) guards against duplicate auto-reserves.
+        existing = db.scalar(select(StashMovement.id).where(
+            StashMovement.fund_id == fund.id, StashMovement.source_entry_id == entry.id))
+        if existing:
+            continue
+        target = (net_income * int(fund.auto_value) // 100 if fund.auto_mode == 'percent'
+                  else int(fund.auto_value))
+        amount = min(remaining, target)
+        if amount <= 0:
+            continue
+        db.add(StashMovement(user_id=user_id, fund_id=fund.id, wallet_id=entry.wallet_id,
+                             source_entry_id=entry.id, kind='deposit', amount=amount,
+                             occurred_on=entry.occurred_on,
+                             note='Tự động tích từ thu nhập #' + str(entry.id)))
+        remaining -= amount
+        total += amount
+    db.flush()
+    return total
+
+
+def reverse_entry_stash_allocations(db: Session, user_id: int, entry_id: int) -> int:
+    """Prevent editing/deleting income when auto-deposits have since been withdrawn.
+
+    The entire caller transaction rolls back if a reversal is impossible.
+    """
+    movements = list(db.scalars(select(StashMovement).where(
+        StashMovement.user_id == user_id, StashMovement.source_entry_id == entry_id
+    ).order_by(StashMovement.id).with_for_update()))
+    for m in movements:
+        fund = stash_fund_for(db, user_id, m.fund_id, True)
+        if stash_fund_balance(db, fund.id, user_id) < m.amount:
+            raise HTTPException(409, 'Quỹ đã rút bớt tiền tự động từ khoản thu này. Hãy hoàn tiền vào quỹ trước khi sửa hoặc xóa thu nhập.')
+        db.delete(m)
+        db.flush()
+    return sum(m.amount for m in movements)
+
+
 def reverse_entry_payments(db, user_id, entry_id):
     """Revert only allocations belonging to this entry (for editing/deletion)."""
     payments = list(db.scalars(select(DebtPayment).where(DebtPayment.user_id==user_id,DebtPayment.entry_id==entry_id).order_by(DebtPayment.id).with_for_update()))
@@ -819,6 +896,19 @@ class NewSavingsMovement(BaseModel):
 class NewStashFund(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     note: str = Field(default='', max_length=300)
+    auto_mode: Literal['off', 'percent', 'fixed'] = 'off'
+    auto_value: int = 0
+    auto_wallet_id: int | None = None  # None: income arriving at any wallet
+
+    @model_validator(mode='after')
+    def validate_auto_rule(self):
+        if self.auto_mode == 'off' and self.auto_value != 0:
+            raise ValueError('Khi tắt tự động, số tiền/tỷ lệ phải bằng 0.')
+        if self.auto_mode == 'percent' and not 1 <= self.auto_value <= 100:
+            raise ValueError('Tỷ lệ tích lũy phải từ 1 đến 100%.')
+        if self.auto_mode == 'fixed' and not 1 <= self.auto_value <= MAX_AMOUNT:
+            raise ValueError('Số tiền tích lũy cố định không hợp lệ.')
+        return self
 
 
 class NewStashMovement(BaseModel):
@@ -1191,6 +1281,18 @@ def security_integrity(request:Request,db:Session=Depends(get_db)):
             checks.append({'kind':'negative_stash_fund','detail':f'Quỹ tích lũy #{fund.id} có số dư âm.'})
     if checked_stash != total_stash_funds(db,u.id):
         checks.append({'kind':'invalid_stash_total','detail':'Số dư quỹ tích lũy không khớp lịch sử.'})
+    for fund in db.scalars(select(StashFund).where(StashFund.user_id == u.id)):
+        mode,value=fund.auto_mode,int(fund.auto_value or 0)
+        if mode not in ('off','percent','fixed') or (mode=='off' and value!=0) or \
+           (mode=='percent' and not 1<=value<=100) or \
+           (mode=='fixed' and not 1<=value<=MAX_AMOUNT):
+            checks.append({'kind':'invalid_stash_auto_rule','detail':f'Quỹ #{fund.id} có quy tắc tự động không hợp lệ.'})
+        if fund.auto_wallet_id is not None and not db.scalar(select(Wallet.id).where(Wallet.id==fund.auto_wallet_id, Wallet.user_id==u.id)):
+            checks.append({'kind':'invalid_stash_auto_wallet','detail':f'Quỹ #{fund.id} gắn sai ví tự động.'})
+    for m in db.scalars(select(StashMovement).where(StashMovement.user_id==u.id,StashMovement.source_entry_id.is_not(None))):
+        source=db.scalar(select(Entry).where(Entry.id==m.source_entry_id,Entry.user_id==u.id))
+        if source is None or source.kind!='income' or source.wallet_id!=m.wallet_id or m.kind!='deposit':
+            checks.append({'kind':'invalid_stash_auto_source','detail':f'Bút toán tự góp #{m.id} không khớp khoản thu nguồn.'})
     for mid, wuid, fuid in db.execute(select(StashMovement.id,Wallet.user_id,StashFund.user_id)
             .outerjoin(Wallet,Wallet.id==StashMovement.wallet_id)
             .outerjoin(StashFund,StashFund.id==StashMovement.fund_id)
@@ -1604,8 +1706,16 @@ def stash_fund_for(db: Session, user_id: int, fund_id: int, lock: bool = False) 
     return fund
 
 
+def validate_stash_auto_wallet(db: Session, user_id: int, data: NewStashFund) -> None:
+    if data.auto_mode != 'off' and data.auto_wallet_id is not None:
+        wallet_for(db, user_id, data.auto_wallet_id, require_active=True)
+    if data.auto_mode == 'off' and data.auto_wallet_id is not None:
+        raise HTTPException(422, 'Không chọn ví khi đã tắt tích lũy tự động.')
+
+
 def stash_fund_json(db: Session, fund: StashFund) -> dict:
     return {'id':fund.id, 'name':fund.name, 'note':fund.note,
+            'auto_mode':fund.auto_mode, 'auto_value':fund.auto_value, 'auto_wallet_id':fund.auto_wallet_id,
             'saved_amount':stash_fund_balance(db,fund.id,fund.user_id),
             'created_at':fund.created_at.isoformat()}
 
@@ -1622,6 +1732,8 @@ def list_stashes(u: User = Depends(current), db: Session = Depends(get_db)):
             'history':[{'id':m.id,'fund_id':m.fund_id,'fund':names.get(m.fund_id,''),
                         'wallet_id':m.wallet_id,'wallet':wallets.get(m.wallet_id,''),
                         'kind':m.kind,'amount':m.amount,'occurred_on':m.occurred_on.isoformat(),
+                        'source': 'auto' if m.source_entry_id is not None else 'manual',
+                        'source_entry_id':m.source_entry_id,
                         'note':m.note} for m in history]}
 
 
@@ -1633,7 +1745,10 @@ def create_stash(data: NewStashFund, u: User = Depends(current), db: Session = D
         raise HTTPException(422,'Tên quỹ không được để trống.')
     if (db.scalar(select(func.count(StashFund.id)).where(StashFund.user_id==u.id)) or 0)>=50:
         raise HTTPException(409,'Mỗi tài khoản tối đa 50 quỹ tích để dành.')
-    fund=StashFund(user_id=u.id,name=name,note=data.note.strip())
+    validate_stash_auto_wallet(db,u.id,data)
+    fund=StashFund(user_id=u.id,name=name,note=data.note.strip(),
+                   auto_mode=data.auto_mode,auto_value=data.auto_value,
+                   auto_wallet_id=data.auto_wallet_id)
     db.add(fund);db.flush();log(db,u.id,'stash_created',f'#{fund.id}: {name}');db.commit()
     return stash_fund_json(db,fund)
 
@@ -1645,8 +1760,11 @@ def update_stash(fund_id:int,data:NewStashFund,u:User=Depends(current),db:Sessio
     name=data.name.strip()
     if not name:
         raise HTTPException(422,'Tên quỹ không được để trống.')
+    validate_stash_auto_wallet(db,u.id,data)
     fund.name=name;fund.note=data.note.strip()
-    log(db,u.id,'stash_updated',f'#{fund.id}');db.commit()
+    fund.auto_mode=data.auto_mode;fund.auto_value=data.auto_value
+    fund.auto_wallet_id=data.auto_wallet_id
+    log(db,u.id,'stash_updated',f'#{fund.id}; auto={data.auto_mode}/{data.auto_value}');db.commit()
     return stash_fund_json(db,fund)
 
 
@@ -1803,6 +1921,7 @@ def post_recurring_once(db: Session, rule: RecurringRule, due: date, skip=False)
         raise HTTPException(409, 'Kỳ này đã được xử lý.')
     entry_id = None
     auto_paid = 0
+    auto_saved = 0
     if not skip:
         # Existing business rules: pay only *payable* debt principal from new income.
         category_for(db, db.get(User,rule.user_id), rule.category_id,rule.kind,True)
@@ -1813,15 +1932,16 @@ def post_recurring_once(db: Session, rule: RecurringRule, due: date, skip=False)
         db.add(e)
         db.flush()
         auto_paid=allocate_income_to_debts(db,rule.user_id,e)
+        auto_saved=allocate_income_to_stashes(db,rule.user_id,e,auto_paid)
         ensure_nonnegative(db,rule.user_id)
         entry_id=e.id
     db.add(RecurringRun(user_id=rule.user_id,rule_id=rule.id,due_on=due,
                         entry_id=entry_id,status='skipped' if skip else 'posted'))
     rule.next_index+=1
     log(db,rule.user_id,'recurring_skipped' if skip else 'recurring_posted',
-        f'#{rule.id} {due.isoformat()}; entry={entry_id}; debt_paid={auto_paid}')
+        f'#{rule.id} {due.isoformat()}; entry={entry_id}; debt_paid={auto_paid}; auto_saved={auto_saved}')
     db.flush()
-    return {'ok':True,'entry_id':entry_id,'due_on':due.isoformat(),'debt_paid':auto_paid}
+    return {'ok':True,'entry_id':entry_id,'due_on':due.isoformat(),'debt_paid':auto_paid,'auto_saved':auto_saved}
 
 
 def process_auto_recurring():
@@ -1837,6 +1957,12 @@ def process_auto_recurring():
         for _ in range(30):  # bounded catch-up per tick, no unlimited loop
             try:
                 with SessionLocal.begin() as db:
+                    # Lock the user BEFORE the rule, matching manual changes and
+                    # all wallet/stash mutations; avoids reversed lock ordering.
+                    owner_id=db.scalar(select(RecurringRule.user_id).where(RecurringRule.id == rule_id))
+                    if owner_id is None:
+                        break
+                    account_locked(db, owner_id)
                     rule=db.scalar(select(RecurringRule).where(RecurringRule.id == rule_id).with_for_update())
                     if not rule or not rule.active or rule.mode!='auto':
                         break
@@ -2041,9 +2167,11 @@ def add_entry(data:NewEntry,u:User=Depends(current),db:Session=Depends(get_db)):
     category_for(db,u,data.category_id,data.kind,True)
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     e=Entry(user_id=u.id,title=data.title.strip(),kind=data.kind,amount=amount,category_id=data.category_id,wallet_id=wallet.id,note=data.note.strip(),occurred_on=data.occurred_on)
-    db.add(e);db.flush();auto_paid=allocate_income_to_debts(db,u.id,e);ensure_nonnegative(db,u.id)
-    log(db,u.id,'entry_added',f'{e.kind} #{e.id}: {e.amount}; debt_paid={auto_paid}')
-    db.commit();return {'id':e.id,'ok':True,'debt_paid':auto_paid}
+    db.add(e);db.flush();auto_paid=allocate_income_to_debts(db,u.id,e)
+    auto_saved=allocate_income_to_stashes(db,u.id,e,auto_paid)
+    ensure_nonnegative(db,u.id)
+    log(db,u.id,'entry_added',f'{e.kind} #{e.id}: {e.amount}; debt_paid={auto_paid}; auto_saved={auto_saved}')
+    db.commit();return {'id':e.id,'ok':True,'debt_paid':auto_paid,'auto_saved':auto_saved}
 
 
 @app.put('/api/transactions/{entry_id}')
@@ -2055,11 +2183,15 @@ def edit_entry(entry_id:int,data:NewEntry,u:User=Depends(current),db:Session=Dep
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
     category_for(db,u,data.category_id,data.kind)
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
+    reverse_entry_stash_allocations(db,u.id,e.id)
     reverse_entry_payments(db,u.id,e.id)
     e.wallet_id=wallet.id
     e.title=data.title.strip();e.kind=data.kind;e.amount=data.amount;e.category_id=data.category_id;e.note=data.note.strip();e.occurred_on=data.occurred_on
-    db.flush();auto_paid=allocate_income_to_debts(db,u.id,e);ensure_nonnegative(db,u.id)
-    log(db,u.id,'entry_edited',f'#{e.id}; debt_paid={auto_paid}');db.commit();return {'ok':True,'debt_paid':auto_paid}
+    db.flush();auto_paid=allocate_income_to_debts(db,u.id,e)
+    auto_saved=allocate_income_to_stashes(db,u.id,e,auto_paid)
+    ensure_nonnegative(db,u.id)
+    log(db,u.id,'entry_edited',f'#{e.id}; debt_paid={auto_paid}; auto_saved={auto_saved}')
+    db.commit();return {'ok':True,'debt_paid':auto_paid,'auto_saved':auto_saved}
 
 
 @app.delete('/api/transactions/{entry_id}')
@@ -2067,6 +2199,7 @@ def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)
     account_locked(db,u.id)
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
+    reverse_entry_stash_allocations(db,u.id,e.id)
     reverse_entry_payments(db,u.id,e.id)
     for run in db.scalars(select(RecurringRun).where(RecurringRun.user_id==u.id,RecurringRun.entry_id==e.id)):
         run.entry_id=None;run.status='deleted'
@@ -2199,6 +2332,8 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
         'lowest_balance':wallet_balance(db,w),'first_shortfall_on':None} for w in wallets}
     debt_balances=[int(d.remaining) for d in db.scalars(select(Debt).where(
         Debt.user_id==user_id,Debt.direction=='payable',Debt.remaining>0).order_by(Debt.id))]
+    stash_rules = list(db.scalars(select(StashFund).where(StashFund.user_id == user_id,
+        StashFund.auto_mode != 'off').order_by(StashFund.id)))
     rules=list(db.scalars(select(RecurringRule).where(
         RecurringRule.user_id==user_id, RecurringRule.active==True).order_by(RecurringRule.id)))
     pending_past=[];paused_wallet_rules=[];planned=[]
@@ -2215,16 +2350,16 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
     planned.sort(key=lambda row:(row[0],row[1],row[2]))
     by_day=defaultdict(list)
     for due,_,__,rule in planned:by_day[due].append(rule)
-    events=[];timeline=[];total_income=total_expense=total_debt=0
+    events=[];timeline=[];total_income=total_expense=total_debt=total_stash=0
     first_shortfall_on=None
     min_total=sum(w['start_balance'] for w in wallet_info.values())
     for offset in range(horizon_days+1):
         day=start+timedelta(days=offset)
-        income=expense=debt_paid=0
+        income=expense=debt_paid=stash_reserved=0
         for rule in by_day.get(day,[]):
             wallet=wallet_info[rule.wallet_id]
             gross=int(rule.amount)
-            allocated=0
+            allocated=auto_reserve=0
             if rule.kind=='income':
                 income+=gross
                 remainder=gross
@@ -2235,7 +2370,17 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
                     remainder-=repay
                     allocated+=repay
                 debt_paid+=allocated
-                delta=gross-allocated
+                net_income=gross-allocated
+                available=net_income
+                for fund in stash_rules:
+                    if available<=0:break
+                    if fund.auto_wallet_id is not None and fund.auto_wallet_id!=rule.wallet_id:continue
+                    suggested=(net_income*int(fund.auto_value)//100 if fund.auto_mode=='percent' else int(fund.auto_value))
+                    reserve=min(available,suggested)
+                    available-=reserve
+                    auto_reserve+=reserve
+                stash_reserved+=auto_reserve
+                delta=gross-allocated-auto_reserve
             else:
                 expense+=gross
                 delta=-gross
@@ -2243,8 +2388,9 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
             events.append({'due_on':day.isoformat(),'title':rule.title,'rule_id':rule.id,
                            'wallet_id':rule.wallet_id,'wallet_name':wallet['name'],'kind':rule.kind,
                            'mode':rule.mode,'amount':gross,'allocated_to_debt':allocated,
+                           'allocated_to_stash':auto_reserve,
                            'net_wallet_delta':delta,'wallet_after':wallet['projected_balance']})
-        total_income+=income;total_expense+=expense;total_debt+=debt_paid
+        total_income+=income;total_expense+=expense;total_debt+=debt_paid;total_stash+=stash_reserved
         total=sum(w['projected_balance'] for w in wallet_info.values())
         min_total=min(min_total,total)
         risk=False
@@ -2256,13 +2402,13 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
                     wallet['first_shortfall_on']=day.isoformat()
         if risk and first_shortfall_on is None:first_shortfall_on=day.isoformat()
         timeline.append({'date':day.isoformat(),'balance':total,'income':income,
-                         'expense':expense,'debt_paid':debt_paid,'shortfall':risk})
+                         'expense':expense,'debt_paid':debt_paid,'stash_reserved':stash_reserved,'shortfall':risk})
     start_balance=sum(w['start_balance'] for w in wallet_info.values())
     end_balance=sum(w['projected_balance'] for w in wallet_info.values())
     return {'as_of':start.isoformat(),'through':finish.isoformat(),'horizon_days':horizon_days,
             'start_balance':start_balance,'end_balance':end_balance,
             'net_change':end_balance-start_balance,'income_gross':total_income,
-            'expense':total_expense,'debt_allocated':total_debt,
+            'expense':total_expense,'debt_allocated':total_debt,'stash_allocated':total_stash,
             'min_total_balance':min_total,'first_shortfall_on':first_shortfall_on,
             'risk_wallet_count':sum(1 for w in wallet_info.values() if w['first_shortfall_on']),
             'overdue_rules':pending_past,'inactive_wallet_rules':paused_wallet_rules,
@@ -2271,7 +2417,7 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
             'total_events':len(events),'events':events[:160],
             'truncated_events':len(events)>160,
             'assumptions':['Chỉ dự báo lịch định kỳ đang hoạt động; không tự tạo giao dịch.',
-                           'Khoản thu dự kiến ưu tiên trả nợ gốc phải trả trước khi vào ví.',
+                           'Khoản thu dự kiến ưu tiên trả nợ gốc; phần còn lại được tự tích vào quỹ theo quy tắc đang bật.',
                            'Lịch trả góp/nợ đến hạn chỉ là nhắc nhở, không tự trừ thêm.',
                            'Các khoản chuyển ví và góp/rút quỹ tiết kiệm không phải thu chi.',
                            'Chi vượt số dư được cảnh báo; ứng dụng thực tế vẫn chặn ghi âm ví.']}
@@ -2411,10 +2557,10 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(Budget).filter(Budget.user_id==target.id).delete(synchronize_session=False)
     db.query(DebtPayment).filter(DebtPayment.user_id==target.id).delete(synchronize_session=False)
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
-    db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
-    db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
     db.query(StashMovement).filter(StashMovement.user_id==target.id).delete(synchronize_session=False)
     db.query(StashFund).filter(StashFund.user_id==target.id).delete(synchronize_session=False)
+    db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
+    db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsMovement).filter(SavingsMovement.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsGoal).filter(SavingsGoal.user_id==target.id).delete(synchronize_session=False)
     db.query(Wallet).filter(Wallet.user_id==target.id).delete(synchronize_session=False)
