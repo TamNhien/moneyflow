@@ -66,6 +66,8 @@ const responses = {
   'transactions/7/receipts':{items:[{id:5,entry_id:7,name:'hoa-don.png',mime_type:'image/png',size_bytes:2048,created_at:'2026-11-04T09:00:00Z'}],max_files:8,max_bytes:8388608},
   'budgets': [], 'budgets/insights':{month:'2026-11',is_current_month:true,as_of:'2026-11-04',days_remaining:26,summary:{count:1,budget_total:1000,spent_total:950,critical_count:1,warning_count:0,at_risk_count:1},items:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,spent_percent:95,remaining:50,over_by:0,status:'critical',projected_spent:1400,projected_over:400,at_risk:true,scheduled_remaining:200,scheduled_count:1,safe_daily:0}],alerts:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,status:'critical',at_risk:true,projected_over:400}]}, 'debts': debtData, 'users': [fakeUser],
   'recurring': {items:[],history:[]}, 'reminders': {items:[],overdue_count:0,upcoming_count:0},
+  'insights/spending': {months:6,from_month:'2026-06',to_month:'2026-11',as_of:'2026-11-06',total_expense:1600000,current_month_spent:100000,previous_month_average:300000,current_month_projection:500000,transaction_count:8,sample_limited:false,monthly:[{month:'2026-10',expense:300000,partial:false},{month:'2026-11',expense:100000,partial:true}],top_categories:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1600000}],alerts:[],recurring_candidates:[{title:'Tiền mạng',category_id:1,category:'Ăn uống',wallet_id:1,months_seen:3,consecutive_months:3,typical_amount:200000,typical_day:15,last_on:'2026-10-15'}],disclaimer:'Phân tích quy tắc từ dữ liệu của chính bạn.'},
+  'insights/category-suggestions': {items:[{category_id:1,category:'Ăn uống',color:'#6475ff',examples:3,strength:'cao'}],sample_limited:false},
   'reports': {end_month:'2026-11',from_month:'2025-12',to_month:'2026-11',months_count:12,totals:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},snapshot:{cash_balance:100000,payable:0,receivable:0,net_worth:100000},selected_month:{income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60},comparison:{income:{current:100,previous:0,difference:100,percentage:null},expense:{current:40,previous:0,difference:40,percentage:null},net_cash:{current:60,previous:0,difference:60,percentage:null}},monthly:Array.from({length:12},(_,i)=>({month:`2026-${String(i+1).padStart(2,'0')}`,income:100,expense:40,debt_paid:0,debt_collected:0,net_cash:60})),categories:[{name:'Ăn uống',color:'#6475ff',amount:40}],transfer_count:0},
   'reports/annual': {year:2026,as_of:'2026-11-04',monthly:Array.from({length:11},(_,i)=>({month:`2026-${String(i+1).padStart(2,'0')}`,income:1000,expense:300,debt_paid:100,debt_collected:0,net_cash:600,available:100000+i*600,reserved:1000,assets:101000+i*600,receivable:0,payable:0,net_worth:101000+i*600})),totals:{income:11000,expense:3300,debt_paid:1100,debt_collected:0,net_cash:6600},comparison:{income:{current:11000,previous:10000,difference:1000,percentage:10},expense:{current:3300,previous:4000,difference:-700,percentage:-17.5}},previous_year:2025,closing:{available:106000,reserved:1000,receivable:0,payable:0,net_worth:107000},disclaimer:'Reconstructed estimate'},
   'forecast': {as_of:'2026-11-03',through:'2026-12-03',horizon_days:30,start_balance:100000,end_balance:45000,net_change:-55000,income_gross:30000,expense:75000,debt_allocated:10000,min_total_balance:45000,first_shortfall_on:null,risk_wallet_count:0,overdue_rules:[],inactive_wallet_rules:[],payable_remaining_scenario:0,wallets:[{id:1,name:'Ví chính',active:true,start_balance:100000,projected_balance:45000,lowest_balance:45000,first_shortfall_on:null}],timeline:Array.from({length:31},(_,i)=>({date:`2026-11-${String(i+3).padStart(2,'0')}`,balance:100000-i*1000,income:0,expense:0,debt_paid:0,shortfall:false})),total_events:2,events:[{due_on:'2026-11-20',title:'Lương',wallet_name:'Ví chính',kind:'income',mode:'manual',amount:30000,allocated_to_debt:10000,net_wallet_delta:20000}] ,truncated_events:false,assumptions:['Chỉ dự báo lịch định kỳ đang hoạt động.']},
@@ -96,7 +98,7 @@ assert.match(element('#page-content').innerHTML, /Xin chào/, 'Initial dashboard
 assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup data was not fetched');
 
 const pages = [
-  ['annual', 'Thống kê tài chính năm'], ['dashboard', 'Xin chào'], ['forecast','Dự báo dòng tiền'], ['savings', 'Mục tiêu tiết kiệm'], ['stashes', 'Tiền tích để dành'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
+  ['insights','Thói quen chi tiêu'], ['annual', 'Thống kê tài chính năm'], ['dashboard', 'Xin chào'], ['forecast','Dự báo dòng tiền'], ['savings', 'Mục tiêu tiết kiệm'], ['stashes', 'Tiền tích để dành'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
   ['transactions', 'Quản lý giao dịch'], ['receipts', 'Hóa đơn &amp; chứng từ'], ['reconciliation', 'Đối soát &amp; kiểm tra tài chính'], ['budgets', 'Ngân sách thông minh'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
@@ -207,3 +209,21 @@ assert.match(element('#page-content').innerHTML,/Kho chứng từ/);
 assert.match(element('#page-content').innerHTML,/hoa-don\.png/);
 assert.match(element('#page-content').innerHTML,/data-action="receipt-search"/);
 console.log('Receipt overview smoke PASS: list, search, filters and ownership-scoped metadata.');
+
+await runInContext('navigate("insights")',context);
+assert.match(element('#page-content').innerHTML,/Xu hướng chi tiêu/);
+assert.match(element('#page-content').innerHTML,/Khoản chi có dấu hiệu lặp lại/);
+assert.match(element('#page-content').innerHTML,/Tiền mạng/);
+runInContext('entryModal()',context);
+assert.match(element('#modal-root').innerHTML,/data-action="category-suggest"/);
+console.log('Spending insights smoke PASS: monthly chart, repeat candidates and opt-in category suggestion.');
+const entryFormMock=element('#modal-form');
+entryFormMock.dataset.form='entry';
+element('[name="title"]').value='Cơm trưa';
+element('[name="kind"]').value='expense';
+element('[name="id"]').value='';
+await runInContext('fetchCategorySuggestions()',context);
+assert.match(element('#entry-smart-suggestions').innerHTML,/data-action="use-category-suggestion"/);
+assert.match(element('#entry-smart-suggestions').innerHTML,/Ăn uống/);
+assert.ok(visited.includes('insights/category-suggestions'), 'Frontend must fetch personalized suggestions on explicit click');
+console.log('Category suggestion smoke PASS: opt-in fetch, user-side selection prompt, no automatic write.');

@@ -1494,5 +1494,102 @@ def test_pwa_static_is_public_only(client):
     assert client.get('/frontend/pwa.js').status_code==404
     home=client.get('/').text
     assert 'rel="manifest"' in home
-    assert '/pwa.js?v=1.0.25' in home
-    assert '/app.js?v=1.0.25' in home
+    assert '/pwa.js?v=1.0.26' in home
+    assert '/app.js?v=1.0.26' in home
+
+
+# v1.0.26: personalized suggestions & insights are owner-scoped, read-only heuristics.
+def test_v126_suggestions_and_spending_privacy(client):
+    from backend.app import (SessionLocal, User, Wallet, Category, Entry,
+                             seed_categories, ph, add_months_clamped)
+    from sqlalchemy import select
+    from datetime import date
+    now=date.today()
+    with SessionLocal.begin() as db:
+        created=[]
+        for username in ('smart26a', 'smart26b'):
+            user=User(username=username, display_name=username,
+                      email=username+'@example.com', password_hash=ph.hash('SecurePassword@12345'),
+                      role='member',active=True,opening_balance=0)
+            db.add(user);db.flush()
+            seed_categories(db,user)
+            db.add(Wallet(user_id=user.id,name='Ví thử',kind='cash',opening_balance=80_000_000,
+                          active=True,is_default=True))
+            created.append(user.id)
+    with TestClient(app) as a, TestClient(app) as b:
+        assert auth_post(a,'/api/login',{'username':'smart26a','password':'SecurePassword@12345'}).status_code==200
+        assert auth_post(b,'/api/login',{'username':'smart26b','password':'SecurePassword@12345'}).status_code==200
+        a_categories=a.get('/api/categories').json()
+        eat=next(c for c in a_categories if c['name']=='Ăn uống' and c['kind']=='expense')
+        bills=next(c for c in a_categories if c['name']=='Hóa đơn' and c['kind']=='expense')
+        a_wallet=a.get('/api/wallets').json()['items'][0]
+        b_categories=b.get('/api/categories').json()
+        b_expense=next(c for c in b_categories if c['kind']=='expense')
+        b_wallet=b.get('/api/wallets').json()['items'][0]
+        for shift in (-3,-2,-1):
+            on=add_months_clamped(date(now.year,now.month,15),shift).isoformat()
+            for title,cat,amount in [('Điện nước căn hộ',bills,220000),('Cơm văn phòng',eat,120000)]:
+                data={'title':title,'kind':'expense','amount':amount,'occurred_on':on,
+                      'category_id':cat['id'],'wallet_id':a_wallet['id']}
+                res=auth_post(a,'/api/transactions',data,csrf=a.get('/api/me').json()['csrf_token'])
+                assert res.status_code==200,res.text
+        other_data={'title':'Điện nước căn hộ','kind':'expense','amount':100000,
+                    'occurred_on':now.isoformat(),'category_id':b_expense['id'],
+                    'wallet_id':b_wallet['id']}
+        assert auth_post(b,'/api/transactions',other_data,
+                         csrf=b.get('/api/me').json()['csrf_token']).status_code==200
+        before=a.get('/api/dashboard?month='+now.strftime('%Y-%m')).json()['balance']
+        search=a.get('/api/insights/category-suggestions',params={'title':'dien nuoc can ho','kind':'expense'})
+        assert search.status_code==200,search.text
+        assert search.json()['items'][0]['category_id']==bills['id']
+        assert search.json()['items'][0]['examples']==3
+        assert a.get('/api/insights/category-suggestions',params={'title':'x','kind':'expense'}).json()['items']==[]
+        assert a.get('/api/insights/category-suggestions',params={'title':'dien nuoc can ho','kind':'income'}).json()['items']==[]
+        assert a.get('/api/insights/category-suggestions',params={'title':'test','kind':'x'}).status_code==422
+        assert a.get('/api/insights/category-suggestions',params={'title':'q'*130}).status_code==422
+        assert a.get('/api/insights/category-suggestions',params={'title':'abc','limit':99}).status_code==422
+        report=a.get('/api/insights/spending?months=6')
+        assert report.status_code==200,report.text
+        result=report.json()
+        assert result['total_expense']==(220000+120000)*3
+        assert result['transaction_count']==6
+        assert result['monthly'][-1]['partial'] is True
+        assert result['recurring_candidates'] and any(x['title']=='Điện nước căn hộ' and x['consecutive_months']>=3 for x in result['recurring_candidates'])
+        assert a.get('/api/dashboard?month='+now.strftime('%Y-%m')).json()['balance']==before
+        assert b.get('/api/insights/spending?months=6').json()['transaction_count']==1
+        assert b.get('/api/insights/category-suggestions',params={'title':'Com van phong'}).json()['items']==[]
+        assert a.get('/api/insights/spending?months=48').status_code==422
+    with TestClient(app) as unknown:
+        assert unknown.get('/api/insights/spending').status_code==401
+        assert unknown.get('/api/insights/category-suggestions?title=DIEN').status_code==401
+
+
+def test_v126_normalization_confidence_recurring_and_alert_logic():
+    from backend.insights import score_titles, suggest_categories, spending_insights, normalize_title
+    from datetime import date
+    assert normalize_title('  Điện, NƯỚC  ')=='dien nuoc'
+    assert score_titles('Điện nước căn hộ','dien nuoc can ho')==1
+    assert score_titles('Uber','Bệnh viện')==0
+    assert suggest_categories('random',[],{})==[]
+    cats={1:{'name':'Hóa đơn','color':'#123456','active':True},2:{'name':'Không hoạt động','color':'#123456','active':False}}
+    assert suggest_categories('dien nuoc',[{'title':'Điện nước','category_id':2}],cats)==[]
+    rows=[]
+    for month in (7,8,9,10):
+        rows += [{'kind':'expense','title':'Cước mạng wifi','amount':200000,'category_id':1,'wallet_id':4,'occurred_on':date(2026,month,15)}]
+    report=spending_insights(rows,cats,[],date(2026,11,6),6)
+    assert report['recurring_candidates'][0]['months_seen']==4
+    assert report['current_month_projection']==0
+    scheduled=[{'title':'Cước mạng wifi','kind':'expense','category_id':1,'wallet_id':4,'active':True}]
+    assert spending_insights(rows,cats,scheduled,date(2026,11,6),6)['recurring_candidates']==[]
+    # More than 8000 expense records suppresses the risk alerts/repetition advice.
+    limited=spending_insights(rows,cats,[],date(2026,11,6),6,sample_limited=True)
+    assert limited['sample_limited'] and not limited['recurring_candidates'] and not limited['alerts']
+    suspicious=[]
+    for month in (8,9,10):
+        suspicious.append({'kind':'expense','title':f'Mua luong thuc {month}', 'amount':200000,
+                           'category_id':1,'wallet_id':4,'occurred_on':date(2026,month,15)})
+    suspicious.append({'kind':'expense','title':'Mua luong thuc 11','amount':500000,
+                       'category_id':1,'wallet_id':4,'occurred_on':date(2026,11,2)})
+    r=spending_insights(suspicious,cats,[],date(2026,11,6),4)
+    assert r['alerts'] and r['alerts'][0]['projected_monthly']>r['alerts'][0]['baseline_monthly']
+    assert r['previous_month_average']==200000

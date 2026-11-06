@@ -1,6 +1,6 @@
-# MoneyFlow Local v1.0.25
+# MoneyFlow Local v1.0.26
 
-Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
+Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, **gợi ý danh mục từ lịch sử và phân tích thói quen chi tiêu**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
 ## Địa chỉ và hệ thống
 
@@ -66,6 +66,29 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.26 — Gợi ý danh mục và phân tích thói quen chi tiêu (mới)
+
+- **Trang Thói quen chi tiêu** ở menu: xem tổng khoản chi 3/6/12 tháng, các danh mục lớn nhất, biểu đồ từng tháng, mức chi trung bình các tháng trước và ước tính cuối tháng. **Tháng hiện tại là dữ liệu chưa đủ tháng**, không so trực tiếp với tháng đầy đủ; ước tính cuối tháng chỉ hiện sau ngày thứ 5 để tránh phóng đại từ 1–2 ngày đầu.
+- **Gợi ý danh mục khi nhập giao dịch:** Trong cửa sổ **Thêm/Sửa giao dịch**, nhập nội dung rồi nhấn **Gợi ý danh mục từ lịch sử**. So khớp chữ thường, chữ có dấu/không dấu và các cụm từ tương tự với giao dịch **cùng loại thu hoặc chi, chỉ của chính tài khoản** trong 24 tháng; loại các danh mục đã tắt. Hiển thị bằng chứng số giao dịch giống nhau và nút để **chủ động chọn**. Không bao giờ tự gắn danh mục hay ghi giao dịch.
+- **Nhận diện khoản chi lặp lại:** Gợi ý khoản cùng nội dung, danh mục, ví, khoảng ngày trong tháng (sai lệch không quá 7 ngày), số tiền ổn định (biên độ không quá 35%) và ít nhất **3 tháng liên tiếp**. Không gợi ý lại một lịch chi tiêu tương ứng đang hoạt động. Chỉ gợi ý xem trang **Định kỳ & nhắc lịch**, không tự tạo lịch trả tiền.
+- **Cảnh báo thay đổi thói quen:** Dự kiến chi tiêu tháng này cao hơn trung bình các tháng trước ít nhất 50% và 150.000đ ở danh mục đã xuất hiện tối thiểu hai tháng trước (mức trung bình tối thiểu 100.000đ). Cảnh báo là **dấu hiệu cần xem lại**, không phải kết luận giao dịch sai hoặc gian lận.
+- **Không thay đổi sổ tiền:** toàn bộ API `GET /api/insights/spending?months=6` và `GET /api/insights/category-suggestions?title=...&kind=expense` chỉ đọc, yêu cầu cookie phiên và giới hạn riêng từng chủ tài khoản. Chuyển ví, trả nợ, rút/góp quỹ tiết kiệm không bị nhầm là chi tiêu. Không sử dụng AI/cloud, không gửi nội dung giao dịch ra bên ngoài.
+- **Giới hạn tính toán:** gợi ý danh mục xem tối đa 800 giao dịch phù hợp gần nhất, thống kê xem tối đa 8.000 khoản chi; khi vượt mức dữ liệu cho phép sẽ ghi rõ đây là **mẫu giới hạn** và tắt cảnh báo cũng như gợi ý lặp lại (tránh kết luận từ mẫu không đủ). Kết quả không phải lời khuyên tài chính cá nhân.
+- **Tương thích:** không thêm hoặc sửa cột PostgreSQL, không thay đổi cấu hình Docker, PWA chỉ cache tài nguyên công khai (được đánh dấu phiên bản 1.0.26). Giữ Dependabot Python/Docker/Actions và mọi lớp xác thực/CSRF từ các bản trước.
+- **Kiểm thử:** kiểm thử API riêng tư giữa hai chủ tài khoản, so khớp tiếng Việt, phát hiện lặp lại, mẫu giới hạn, xác thực bắt buộc, không đổi số dư và màn hình frontend mô phỏng.
+
+**Chạy và phát hành trên Windows:**
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\test.ps1
+.\scripts\run.ps1
+.\scripts\publish.ps1 -Version 1.0.26
+```
+
+---
 
 ## v1.0.25 — Cài đặt PWA và thông báo Windows có kiểm soát
 

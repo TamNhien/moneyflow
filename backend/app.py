@@ -20,6 +20,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from collections import defaultdict
+from backend.insights import month_index, month_key, suggest_categories, spending_insights
 from statistics import median
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -2463,6 +2464,53 @@ def delete_receipt(receipt_id: int, u: User = Depends(current), db: Session = De
     db.commit()
     destination.unlink(missing_ok=True)
     return {'ok': True}
+
+
+# v1.0.26: Insights are always read-only and scoped to the authenticated user.
+# A maximum number of sampled rows prevents unbounded scans in a local installation.
+@app.get('/api/insights/category-suggestions')
+def category_suggestions(title: str = '', kind: Literal['expense', 'income'] = 'expense',
+                         exclude_entry_id: int | None = None, limit: int = 3,
+                         u: User = Depends(current), db: Session = Depends(get_db)):
+    title = title.strip()
+    if len(title) > 120 or limit < 1 or limit > 5 or (exclude_entry_id is not None and exclude_entry_id < 1):
+        raise HTTPException(422, 'Nội dung hoặc giới hạn gợi ý không hợp lệ.')
+    if len(title) < 3:
+        return {'items': [], 'sample_limited': False, 'basis': 'Cần ít nhất 3 ký tự để gợi ý.'}
+    cutoff = add_months_clamped(date.today(), -24)
+    stmt = select(Entry).where(Entry.user_id == u.id, Entry.kind == kind,
+                               Entry.occurred_on >= cutoff, Entry.occurred_on <= date.today())
+    if exclude_entry_id is not None:
+        stmt = stmt.where(Entry.id != exclude_entry_id)
+    matched = list(db.scalars(stmt.order_by(Entry.occurred_on.desc(), Entry.id.desc()).limit(801)))
+    cats = {c.id: {'name': c.name, 'color': c.color, 'active': c.active}
+            for c in db.scalars(select(Category).where(Category.user_id == u.id, Category.kind == kind))}
+    items = suggest_categories(title, [dict(title=e.title, category_id=e.category_id) for e in matched[:800]], cats, limit)
+    return {'items': items, 'sample_limited': len(matched) > 800,
+            'basis': 'Dựa trên nội dung giao dịch tương tự trong 24 tháng của chính tài khoản. Chỉ gợi ý, không tự đổi danh mục.'}
+
+
+@app.get('/api/insights/spending')
+def get_spending_insights(months: int = 6, u: User = Depends(current), db: Session = Depends(get_db)):
+    if months not in (3, 6, 12):
+        raise HTTPException(422, 'Chọn khoảng 3, 6 hoặc 12 tháng.')
+    now = date.today()
+    start_key = month_key(month_index(now) - months + 1)
+    start_on = date.fromisoformat(start_key + '-01')
+    sampled = list(db.scalars(select(Entry).where(Entry.user_id == u.id,
+                      Entry.kind == 'expense', Entry.occurred_on >= start_on,
+                      Entry.occurred_on <= now)
+                    .order_by(Entry.occurred_on.desc(), Entry.id.desc()).limit(8001)))
+    categories = {c.id: {'name': c.name, 'color': c.color, 'active': c.active}
+                  for c in db.scalars(select(Category).where(Category.user_id == u.id))}
+    recurring = [dict(title=r.title, kind=r.kind, category_id=r.category_id,
+                      wallet_id=r.wallet_id, active=r.active)
+                 for r in db.scalars(select(RecurringRule).where(RecurringRule.user_id == u.id,
+                                                                   RecurringRule.kind == 'expense'))]
+    return spending_insights([dict(kind=e.kind, title=e.title, category_id=e.category_id,
+                    wallet_id=e.wallet_id, amount=e.amount, occurred_on=e.occurred_on)
+                    for e in sampled[:8000]], categories, recurring, now, months,
+                    sample_limited=len(sampled) > 8000)
 
 
 @app.get('/api/transactions')
