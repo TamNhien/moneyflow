@@ -90,6 +90,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(12), default='member')
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     opening_balance: Mapped[int] = mapped_column(BigInteger, default=0)
+    auto_repay_debts: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -162,6 +163,7 @@ class StashFund(Base):
     auto_mode: Mapped[str] = mapped_column(String(10), default='off', server_default='off')
     auto_value: Mapped[int] = mapped_column(BigInteger, default=0, server_default='0')
     auto_wallet_id: Mapped[int | None] = mapped_column(ForeignKey('wallets.id'), nullable=True)
+    min_wallet_balance: Mapped[int] = mapped_column(BigInteger, default=0, server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -396,6 +398,7 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(254)'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(300)'))
+            conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_repay_debts BOOLEAN NOT NULL DEFAULT FALSE'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending TEXT'))
             conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending_until TIMESTAMPTZ'))
@@ -415,12 +418,13 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE debt_payments ADD COLUMN IF NOT EXISTS interest_amount BIGINT NOT NULL DEFAULT 0'))
             conn.execute(text("ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_mode VARCHAR(10) NOT NULL DEFAULT 'off'"))
             conn.execute(text('ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_value BIGINT NOT NULL DEFAULT 0'))
+            conn.execute(text('ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS min_wallet_balance BIGINT NOT NULL DEFAULT 0'))
             conn.execute(text('ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_wallet_id INTEGER REFERENCES wallets(id)'))
             conn.execute(text('ALTER TABLE stash_movements ADD COLUMN IF NOT EXISTS source_entry_id INTEGER REFERENCES entries(id)'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_stash_auto_entry_fund ON stash_movements (fund_id, source_entry_id) WHERE source_entry_id IS NOT NULL'))
         else:
             columns = {row[1] for row in conn.execute(text('PRAGMA table_info(users)'))}
-            for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300'),('totp_secret','TEXT'),('totp_pending','TEXT'),('totp_pending_until','DATETIME'),('totp_last_step','INTEGER NOT NULL DEFAULT -1'),('totp_failed_attempts','INTEGER NOT NULL DEFAULT 0'),('totp_locked_until','DATETIME')]:
+            for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300'),('auto_repay_debts','BOOLEAN NOT NULL DEFAULT 0'),('totp_secret','TEXT'),('totp_pending','TEXT'),('totp_pending_until','DATETIME'),('totp_last_step','INTEGER NOT NULL DEFAULT -1'),('totp_failed_attempts','INTEGER NOT NULL DEFAULT 0'),('totp_locked_until','DATETIME')]:
                 if name not in columns: conn.execute(text(f'ALTER TABLE users ADD COLUMN {name} {kind}'))
             existing_sessions = {row[1] for row in conn.execute(text('PRAGMA table_info(auth_sessions)'))}
             for col, definition in [('created_at', 'DATETIME'), ('user_agent', "VARCHAR(180) NOT NULL DEFAULT ''")]:
@@ -444,6 +448,7 @@ async def lifespan(_app: FastAPI):
             for table, columns in {
                 'stash_funds': [('auto_mode', "VARCHAR(10) NOT NULL DEFAULT 'off'"),
                                 ('auto_value', 'BIGINT NOT NULL DEFAULT 0'),
+                                ('min_wallet_balance','BIGINT NOT NULL DEFAULT 0'),
                                 ('auto_wallet_id', 'INTEGER REFERENCES wallets(id)')],
                 'stash_movements': [('source_entry_id', 'INTEGER REFERENCES entries(id)')],
             }.items():
@@ -575,6 +580,7 @@ def user_json(u):
     return {'id':u.id,'username':u.username,'email':u.email or '', 'phone':local_vietnam_phone(u.phone),
             'address':u.address or '', 'profile_complete':bool(u.email and u.phone and u.address),
             'role':u.role,'active':u.active,'totp_enabled':bool(u.totp_secret),'opening_balance':u.opening_balance,
+            'auto_repay_debts':bool(u.auto_repay_debts),
             'created_at':u.created_at.isoformat()}
 
 
@@ -785,8 +791,8 @@ def wallet_json(db: Session, wallet: Wallet) -> dict:
 
 
 def allocate_income_to_debts(db, user_id, entry):
-    """Repay active principals oldest first, atomically with the income entry."""
-    if entry.kind != 'income':
+    """Opt-in automatic repayment; prior automatic payments are preserved."""
+    if entry.kind != 'income' or not bool(db.get(User,user_id).auto_repay_debts):
         return 0
     available = int(entry.amount)
     paid = 0
@@ -829,7 +835,10 @@ def allocate_income_to_stashes(db: Session, user_id: int, entry: Entry, debt_pai
             continue
         target = (net_income * int(fund.auto_value) // 100 if fund.auto_mode == 'percent'
                   else int(fund.auto_value))
-        amount = min(remaining, target)
+        wallet = wallet_for(db,user_id,entry.wallet_id)
+        # Keep enough cash for living costs; earlier fund allocations already count.
+        disposable = max(0,wallet_balance(db,wallet) - int(fund.min_wallet_balance or 0))
+        amount = min(remaining,target,disposable)
         if amount <= 0:
             continue
         db.add(StashMovement(user_id=user_id, fund_id=fund.id, wallet_id=entry.wallet_id,
@@ -838,6 +847,7 @@ def allocate_income_to_stashes(db: Session, user_id: int, entry: Entry, debt_pai
                              note='Tự động tích từ thu nhập #' + str(entry.id)))
         remaining -= amount
         total += amount
+        db.flush()  # make the next rule see the reduced spendable balance
     db.flush()
     return total
 
@@ -980,7 +990,8 @@ class NewDebt(BaseModel):
 
 class ManualDebtPayment(BaseModel):
     amount: int
-    interest_amount: int = 0
+    interest_amount: int = 0  # legacy clients; accepted for compatibility
+    interest_rate_pct: Decimal | None = Field(default=None, ge=0, le=100, decimal_places=2)
     paid_on: date = Field(default_factory=date.today)
     wallet_id: int | None = None
 
@@ -1024,6 +1035,7 @@ class NewStashFund(BaseModel):
     note: str = Field(default='', max_length=300)
     auto_mode: Literal['off', 'percent', 'fixed'] = 'off'
     auto_value: int = 0
+    min_wallet_balance: int = Field(default=0, ge=0, le=MAX_AMOUNT)
     auto_wallet_id: int | None = None  # None: income arriving at any wallet
 
     @model_validator(mode='after')
@@ -1582,6 +1594,20 @@ def change_password(data:ChangePassword,request:Request,db:Session=Depends(get_d
     db.commit();return {'ok':True}
 
 
+class DebtAutoSettings(BaseModel):
+    enabled: bool = Field(strict=True)
+
+
+@app.put('/api/settings/auto-debt')
+def update_auto_debt_settings(data:DebtAutoSettings,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    target=db.scalar(select(User).where(User.id==u.id).with_for_update())
+    target.auto_repay_debts=data.enabled
+    log(db,u.id,'debt_auto_setting','enabled' if data.enabled else 'disabled')
+    db.commit()
+    return {'ok':True,'auto_repay_debts':bool(target.auto_repay_debts)}
+
+
 @app.put('/api/profile')
 def update_profile(data:ProfileEdit,request:Request,db:Session=Depends(get_db)):
     u,_=session_lookup(request,db)
@@ -1807,7 +1833,12 @@ def delete_debt(debt_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
 @app.post('/api/debts/{debt_id}/payments')
 def pay_debt_manual(debt_id:int,data:ManualDebtPayment,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     amount=check_amount(data.amount)
-    interest=check_amount(data.interest_amount,zero=True)
+    if data.interest_rate_pct is not None:
+        if data.interest_amount != 0:
+            raise HTTPException(422, 'Chỉ nhập lãi suất % hoặc lãi tiền, không dùng cả hai.')
+        interest=int((Decimal(amount)*data.interest_rate_pct/Decimal(100)).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
+    else:
+        interest=check_amount(data.interest_amount,zero=True)
     if amount+interest>MAX_AMOUNT:raise HTTPException(422,'Tổng tiền vượt hạn mức.')
     if data.paid_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày thanh toán không hợp lệ.')
     account_locked(db,u.id)
@@ -1823,7 +1854,7 @@ def pay_debt_manual(debt_id:int,data:ManualDebtPayment,request:Request,u:User=De
     db.add(DebtPayment(user_id=u.id,debt_id=debt.id,wallet_id=wallet.id,amount=amount,
                        interest_amount=interest,mode='manual',paid_on=data.paid_on))
     db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'debt_manual_payment',f'#{debt.id}: principal={amount}, interest={interest}')
+    log(db,u.id,'debt_manual_payment',f'#{debt.id}: principal={amount}, interest={interest}, rate={data.interest_rate_pct}')
     result={'ok':True,'remaining':debt.remaining}
     save_financial_result(db,u.id,operation,result);db.commit();return result
 
@@ -1960,6 +1991,8 @@ def stash_fund_for(db: Session, user_id: int, fund_id: int, lock: bool = False) 
 def validate_stash_auto_wallet(db: Session, user_id: int, data: NewStashFund) -> None:
     if data.auto_mode != 'off' and data.auto_wallet_id is not None:
         wallet_for(db, user_id, data.auto_wallet_id, require_active=True)
+    if data.auto_mode == 'off' and data.min_wallet_balance:
+        raise HTTPException(422, 'Chỉ đặt mức tiền giữ lại khi bật tự động tích lũy.')
     if data.auto_mode == 'off' and data.auto_wallet_id is not None:
         raise HTTPException(422, 'Không chọn ví khi đã tắt tích lũy tự động.')
 
@@ -1967,6 +2000,7 @@ def validate_stash_auto_wallet(db: Session, user_id: int, data: NewStashFund) ->
 def stash_fund_json(db: Session, fund: StashFund) -> dict:
     return {'id':fund.id, 'name':fund.name, 'note':fund.note,
             'auto_mode':fund.auto_mode, 'auto_value':fund.auto_value, 'auto_wallet_id':fund.auto_wallet_id,
+            'min_wallet_balance':fund.min_wallet_balance,
             'saved_amount':stash_fund_balance(db,fund.id,fund.user_id),
             'created_at':fund.created_at.isoformat()}
 
@@ -1999,7 +2033,7 @@ def create_stash(data: NewStashFund, u: User = Depends(current), db: Session = D
     validate_stash_auto_wallet(db,u.id,data)
     fund=StashFund(user_id=u.id,name=name,note=data.note.strip(),
                    auto_mode=data.auto_mode,auto_value=data.auto_value,
-                   auto_wallet_id=data.auto_wallet_id)
+                   auto_wallet_id=data.auto_wallet_id,min_wallet_balance=data.min_wallet_balance)
     db.add(fund);db.flush();log(db,u.id,'stash_created',f'#{fund.id}: {name}');db.commit()
     return stash_fund_json(db,fund)
 
@@ -2015,6 +2049,7 @@ def update_stash(fund_id:int,data:NewStashFund,u:User=Depends(current),db:Sessio
     fund.name=name;fund.note=data.note.strip()
     fund.auto_mode=data.auto_mode;fund.auto_value=data.auto_value
     fund.auto_wallet_id=data.auto_wallet_id
+    fund.min_wallet_balance=data.min_wallet_balance
     log(db,u.id,'stash_updated',f'#{fund.id}; auto={data.auto_mode}/{data.auto_value}');db.commit()
     return stash_fund_json(db,fund)
 
@@ -2103,6 +2138,30 @@ def toggle_wallet(wallet_id:int,u:User=Depends(current),db:Session=Depends(get_d
     w.active=not w.active
     log(db,u.id,'wallet_toggled',f'#{w.id}: {w.active}');db.commit()
     return wallet_json(db,w)
+
+
+@app.delete('/api/wallets/{wallet_id}')
+def delete_wallet(wallet_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    account_locked(db,u.id)
+    wallet=db.scalar(select(Wallet).where(Wallet.id==wallet_id,Wallet.user_id==u.id).with_for_update())
+    if wallet is None:
+        raise HTTPException(404,'Không tìm thấy ví.')
+    if wallet.is_default:
+        raise HTTPException(409,'Không thể xóa ví chính. Có thể đổi tên ví chính.')
+    if wallet.opening_balance != 0 or wallet_balance(db,wallet) != 0:
+        raise HTTPException(409,'Chỉ xóa ví có số dư hiện tại và số dư ban đầu bằng 0. Hãy chuyển tiền về ví khác trước.')
+    # Deleting a wallet with references would invalidate audit/financial history.
+    checks=((Entry,Entry.wallet_id),(DebtPayment,DebtPayment.wallet_id),
+            (WalletTransfer,WalletTransfer.from_wallet_id),(WalletTransfer,WalletTransfer.to_wallet_id),
+            (SavingsMovement,SavingsMovement.wallet_id),(StashMovement,StashMovement.wallet_id),
+            (StashFund,StashFund.auto_wallet_id),(RecurringRule,RecurringRule.wallet_id),
+            (WalletReconciliation,WalletReconciliation.wallet_id))
+    if any(db.scalar(select(model.id).where(field==wallet.id).limit(1)) is not None for model,field in checks):
+        raise HTTPException(409,'Ví đã có lịch sử giao dịch hoặc liên kết quỹ/lịch. Hãy khóa ví để bảo toàn dữ liệu đối soát.')
+    db.delete(wallet)
+    log(db,u.id,'wallet_deleted',f'#{wallet_id}')
+    db.commit()
+    return {'ok':True}
 
 
 @app.post('/api/wallet-transfers')
@@ -2964,6 +3023,7 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
     wallet_info={w.id:{'id':w.id,'name':w.name,'active':w.active,
         'start_balance':wallet_balance(db,w),'projected_balance':wallet_balance(db,w),
         'lowest_balance':wallet_balance(db,w),'first_shortfall_on':None} for w in wallets}
+    auto_repay=bool(db.get(User,user_id).auto_repay_debts)
     debt_balances=[int(d.remaining) for d in db.scalars(select(Debt).where(
         Debt.user_id==user_id,Debt.direction=='payable',Debt.remaining>0).order_by(Debt.id))]
     stash_rules = list(db.scalars(select(StashFund).where(StashFund.user_id == user_id,
@@ -2997,7 +3057,7 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
             if rule.kind=='income':
                 income+=gross
                 remainder=gross
-                for ix,amount in enumerate(debt_balances):
+                for ix,amount in enumerate(debt_balances if auto_repay else []):
                     if not remainder:break
                     repay=min(remainder,amount)
                     debt_balances[ix]-=repay
@@ -3010,7 +3070,9 @@ def compute_cash_forecast(db: Session, user_id: int, horizon_days: int = 30,
                     if available<=0:break
                     if fund.auto_wallet_id is not None and fund.auto_wallet_id!=rule.wallet_id:continue
                     suggested=(net_income*int(fund.auto_value)//100 if fund.auto_mode=='percent' else int(fund.auto_value))
-                    reserve=min(available,suggested)
+                    wallet_cash=wallet['projected_balance']+gross-allocated-auto_reserve
+                    safe_cash=max(0,wallet_cash-int(fund.min_wallet_balance or 0))
+                    reserve=min(available,suggested,safe_cash)
                     available-=reserve
                     auto_reserve+=reserve
                 stash_reserved+=auto_reserve

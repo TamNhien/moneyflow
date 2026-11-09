@@ -1,11 +1,11 @@
-/* MoneyFlow v1.0.27: public UI shell only; NEVER cache authenticated API data. */
+/* MoneyFlow v1.0.28: public UI shell only; NEVER cache authenticated API data. */
 'use strict';
-const CACHE_NAME = 'moneyflow-shell-v1.0.27';
+const CACHE_NAME = 'moneyflow-shell-v1.0.28';
 const CACHE_PREFIX = 'moneyflow-shell-';
 const ASSETS = [
   '/offline.html', '/logo.svg', '/favicon.svg', '/apple-touch-icon.png',
   '/icon-192.png', '/icon-512.png', '/icon-512-maskable.png', '/manifest.webmanifest',
-  '/main.css?v=1.0.27', '/app.js?v=1.0.27', '/pwa.js?v=1.0.27'
+  '/main.css?v=1.0.28', '/app.js?v=1.0.28', '/pwa.js?v=1.0.28'
 ];
 const PUBLIC_ASSET_URLS = new Set(ASSETS.map(path => new URL(path, self.location.origin).href));
 self.addEventListener('install', event => {

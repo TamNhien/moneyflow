@@ -119,7 +119,7 @@ assert.equal(visited.filter(x => x === 'wallets').length >= pages.length + 1, tr
 console.log(`Frontend smoke PASS: bootstrap + ${pages.length} pages (mocked API, no database).`);
 await runInContext('navigate("history")', context);
 assert.match(element('#page-content').innerHTML, /Đã sửa|Sửa/);
-assert.match(element('#page-content').innerHTML, /25\.000/);
+assert.match(element('#page-content').innerHTML, /25,000/);
 console.log('Transaction revision screen smoke PASS: before and after amounts.');
 // Recurring form and reminder badge are essential new surfaces in v1.0.14.
 await runInContext('navigate("recurring")', context);
@@ -232,3 +232,21 @@ assert.match(element('#entry-smart-suggestions').innerHTML,/data-action="use-cat
 assert.match(element('#entry-smart-suggestions').innerHTML,/Ăn uống/);
 assert.ok(visited.includes('insights/category-suggestions'), 'Frontend must fetch personalized suggestions on explicit click');
 console.log('Category suggestion smoke PASS: opt-in fetch, user-side selection prompt, no automatic write.');
+
+// v1.0.28: input and output use comma grouping; debt repayment % is explicit.
+assert.equal(runInContext('fmoney(20000000)',context),'20,000,000 ₫');
+assert.equal(runInContext('numericMoney("20,000,000")',context),20000000);
+await runInContext('navigate("debts")',context);
+assert.match(element('#page-content').innerHTML,/data-action="debt-auto-toggle"/);
+assert.match(element('#page-content').innerHTML,/Bật tự trả nợ/);
+runInContext('payDebtModal({id:88,name:"Vay mua xe",direction:"payable",remaining:20000000})',context);
+assert.match(element('#modal-root').innerHTML,/name="interest_rate_pct"/);
+assert.doesNotMatch(element('#modal-root').innerHTML,/name="interest_amount"/);
+assert.match(element('#modal-root').innerHTML,/Lãi.*\(%\)/);
+runInContext('stashModal({id:12,name:"Quỹ",auto_mode:"fixed",auto_value:10000,auto_wallet_id:null,min_wallet_balance:100000})',context);
+assert.match(element('#modal-root').innerHTML,/name="min_wallet_balance"/);
+responses.wallets.items.push({id:9,name:'Ví phụ',kind:'cash',active:false,is_default:false,opening_balance:0,balance:0});
+await runInContext('navigate("wallets")',context);
+assert.match(element('#page-content').innerHTML,/data-action="wallet-delete" data-id="9"/);
+assert.doesNotMatch(element('#page-content').innerHTML,/data-action="wallet-delete" data-id="1"/);
+console.log('v1.0.28 UI smoke PASS: comma formatting, repay toggle, interest percent, wallet deletion, reserve floor.');

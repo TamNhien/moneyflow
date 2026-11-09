@@ -216,6 +216,7 @@ def test_debts_auto_repayment_and_consistency(client):
     r=auth_post(client,'/api/login',{'username':'debtor','password':'SecurePassword@12345'})
     assert r.status_code==200,r.text
     csrf=r.json()['csrf_token']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put').status_code==200
     categories=client.get('/api/categories').json()
     inc=next(c for c in categories if c['kind']=='income')
     exp=next(c for c in categories if c['kind']=='expense')
@@ -323,6 +324,7 @@ def test_wallets_transfer_income_expense_and_debt(client):
     member=auth_post(client,'/api/login',{'username':'walletmember','password':'SecurePassword@12345'})
     assert member.status_code==200,member.text
     csrf=member.json()['csrf_token']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put').status_code==200
     w=client.get('/api/wallets').json()
     assert len(w['items'])==1 and w['items'][0]['is_default']
     cash_id=w['items'][0]['id']
@@ -388,6 +390,7 @@ def test_advanced_receivables_installments_interest_and_wallet_cashflow(client):
     r=auth_post(client,'/api/login',{'username':unique,'password':'SecurePassword@12345'})
     assert r.status_code==200,r.text
     csrf=r.json()['csrf_token']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put').status_code==200
     assert auth_post(client,'/api/opening-balance',{'opening_balance':1000000},method='put',csrf=csrf).status_code==200
     payable={'name':'Vay mua xe','lender':'Ngân hàng','principal':200000,'direction':'payable',
              'interest_rate_pct':'12.00','installment_count':4,'due_date':'2026-12-01','note':''}
@@ -473,6 +476,7 @@ def test_recurring_schedule_reminders_and_balances(client):
     login=auth_post(client,'/api/login',{'username':username,'password':'SecurePassword@12345'})
     assert login.status_code==200,login.text
     csrf=login.json()['csrf_token']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put').status_code==200
     assert auth_post(client,'/api/opening-balance',{'opening_balance':50000},method='put',csrf=csrf).status_code==200
     wallet=client.get('/api/wallets').json()['items'][0]
     cats=client.get('/api/categories').json()
@@ -565,6 +569,7 @@ def test_reports_cashflow_excel_pdf_and_isolation(client):
     login=auth_post(client,'/api/login',{'username':'reporter','password':user['password']})
     assert login.status_code==200,login.text
     token=login.json()['csrf_token']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=token,method='put').status_code==200
     assert auth_post(client,'/api/opening-balance',{'opening_balance':1_000_000},method='put',csrf=token).status_code==200
     cats=client.get('/api/categories').json();expense=next(c for c in cats if c['kind']=='expense');income=next(c for c in cats if c['kind']=='income')
     default=client.get('/api/wallets').json()['items'][0]['id']
@@ -787,7 +792,7 @@ def test_forecast_read_only_wallet_risk_and_debt_allocation(client):
                              Debt, Entry, compute_cash_forecast)
     start=date.today()
     with SessionLocal() as db:
-        u=User(username='forecast_test_owner', display_name='forecast_test_owner',
+        u=User(username='forecast_test_owner', auto_repay_debts=True, display_name='forecast_test_owner',
                password_hash='not-used', email='forecast_test_owner@example.com',
                phone='0907777888',address='Local test',role='member',active=True,opening_balance=0)
         db.add(u); db.flush()
@@ -962,6 +967,7 @@ def test_auto_stash_percentage_fixed_after_debt_and_reversal(client):
     r=auth_post(client,'/api/login',{'username':'stashauto20','password':'SecurePassword@12345'})
     assert r.status_code == 200,r.text
     csrf=r.json()['csrf_token']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put').status_code==200
     cats=client.get('/api/categories').json()
     income_id=next(x['id'] for x in cats if x['kind']=='income')
     expense_id=next(x['id'] for x in cats if x['kind']=='expense')
@@ -1494,8 +1500,8 @@ def test_pwa_static_is_public_only(client):
     assert client.get('/frontend/pwa.js').status_code==404
     home=client.get('/').text
     assert 'rel="manifest"' in home
-    assert '/pwa.js?v=1.0.27' in home
-    assert '/app.js?v=1.0.27' in home
+    assert '/pwa.js?v=1.0.28' in home
+    assert '/app.js?v=1.0.28' in home
 
 
 # v1.0.27: personalized suggestions & insights are owner-scoped, read-only heuristics.
@@ -1593,3 +1599,97 @@ def test_v126_normalization_confidence_recurring_and_alert_logic():
     r=spending_insights(suspicious,cats,[],date(2026,11,6),4)
     assert r['alerts'] and r['alerts'][0]['projected_monthly']>r['alerts'][0]['baseline_monthly']
     assert r['previous_month_average']==200000
+
+
+def test_v128_optional_income_debt_percent_interest_and_wallet_removal(client):
+    """v1.0.28: opt-in debt, manual interest in %, safe empty-wallet deletion."""
+    admin_login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    assert admin_login.status_code==200
+    username='v128'+uuid4().hex[:10]
+    assert auth_post(client,'/api/users',credentials(username),csrf=admin_login.json()['csrf_token']).status_code==200
+    login=auth_post(client,'/api/login',{'username':username,'password':'SecurePassword@12345'})
+    assert login.status_code==200
+    csrf=login.json()['csrf_token']
+    assert client.get('/api/me').json()['user']['auto_repay_debts'] is False
+    wid=client.get('/api/wallets').json()['items'][0]['id']
+    assert auth_post(client,f'/api/wallets/{wid}',csrf=csrf,method='delete').status_code==409
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':1000000},csrf=csrf,method='put').status_code==200
+    inc=next(c['id'] for c in client.get('/api/categories').json() if c['kind']=='income')
+    loan=auth_post(client,'/api/debts',{'name':'Khoản nợ thử nghiệm','principal':300000},csrf=csrf)
+    assert loan.status_code==200,loan.text
+    did=loan.json()['id']
+    def income(amount):
+        return {'title':'Tiền lương','kind':'income','amount':amount,'category_id':inc,
+                'wallet_id':wid,'occurred_on':'2026-11-09'}
+    first=auth_post(client,'/api/transactions',income(500000),csrf=csrf)
+    assert first.status_code==200 and first.json()['debt_paid']==0,first.text
+    assert client.get('/api/debts').json()['total_remaining']==300000
+    assert client.get('/api/wallets').json()['total_balance']==1500000
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':'true'},csrf=csrf,method='put').status_code==422
+    enabled=auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put')
+    assert enabled.status_code==200 and enabled.json()['auto_repay_debts'] is True
+    second=auth_post(client,'/api/transactions',income(200000),csrf=csrf)
+    assert second.status_code==200 and second.json()['debt_paid']==200000,second.text
+    assert client.get('/api/debts').json()['total_remaining']==100000
+    assert client.get('/api/wallets').json()['total_balance']==1500000
+    disabled=auth_post(client,'/api/settings/auto-debt',{'enabled':False},csrf=csrf,method='put')
+    assert disabled.status_code==200
+    third=auth_post(client,'/api/transactions',income(100000),csrf=csrf)
+    assert third.status_code==200 and third.json()['debt_paid']==0
+    assert client.get('/api/wallets').json()['total_balance']==1600000
+    assert client.get('/api/debts').json()['total_remaining']==100000
+    # Interest percent is on the principal of *this payment*, not on the annual rate.
+    invalid=auth_post(client,f'/api/debts/{did}/payments',
+          {'amount':100000,'interest_rate_pct':'10.00','interest_amount':1000,'wallet_id':wid},csrf=csrf)
+    assert invalid.status_code==422
+    paid=auth_post(client,f'/api/debts/{did}/payments',
+         {'amount':100000,'interest_rate_pct':'10.00','wallet_id':wid,'paid_on':'2026-11-09'},csrf=csrf)
+    assert paid.status_code==200,paid.text
+    d=client.get('/api/debts').json()
+    assert d['total_remaining']==0
+    latest=next(x for x in d['payments'] if x['mode']=='manual' and x['debt_id']==did)
+    assert latest['amount']==100000 and latest['interest_amount']==10000
+    assert client.get('/api/wallets').json()['total_balance']==1490000
+    assert auth_post(client,'/api/wallets',{'name':'Ví có tiền','opening_balance':200},csrf=csrf).status_code==200
+    with_funds=next(x for x in client.get('/api/wallets').json()['items'] if x['name']=='Ví có tiền')
+    assert auth_post(client,f"/api/wallets/{with_funds['id']}",csrf=csrf,method='delete').status_code==409
+    empty=auth_post(client,'/api/wallets',{'name':'Ví phụ trống','opening_balance':0},csrf=csrf)
+    assert empty.status_code==200
+    empty_id=empty.json()['id']
+    assert auth_post(client,f'/api/wallets/{empty_id}',csrf=csrf,method='delete').status_code==200
+    assert all(w['id']!=empty_id for w in client.get('/api/wallets').json()['items'])
+    once=auth_post(client,'/api/wallets',{'name':'Ví có chuyển tiền','opening_balance':0},csrf=csrf)
+    assert once.status_code==200
+    transfer=auth_post(client,'/api/wallet-transfers',{'from_wallet_id':wid,'to_wallet_id':once.json()['id'],
+        'amount':1000,'occurred_on':'2026-11-09'},csrf=csrf)
+    assert transfer.status_code==200
+    assert auth_post(client,f'/api/wallet-transfers/{transfer.json()["id"]}',csrf=csrf,method='delete').status_code==200
+    assert auth_post(client,f"/api/wallets/{once.json()['id']}",csrf=csrf,method='delete').status_code==200  # undone transfer removed from ledger
+
+
+def test_v128_stash_keeps_wallet_minimum(client):
+    """Deposit is capped to protect living funds, including between multiple rules."""
+    admin=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    username='v128stash'+uuid4().hex[:8]
+    assert auth_post(client,'/api/users',credentials(username),csrf=admin.json()['csrf_token']).status_code==200
+    login=auth_post(client,'/api/login',{'username':username,'password':'SecurePassword@12345'})
+    assert login.status_code==200
+    csrf=login.json()['csrf_token']
+    wid=client.get('/api/wallets').json()['items'][0]['id']
+    assert auth_post(client,'/api/opening-balance',{'opening_balance':100000},csrf=csrf,method='put').status_code==200
+    # Never reserve money below a 100,000 minimum, even across two funds.
+    bad=auth_post(client,'/api/stashes',{'name':'Sai','auto_mode':'off','auto_value':0,
+                  'min_wallet_balance':1000},csrf=csrf)
+    assert bad.status_code==422
+    for n in ('Quỹ A','Quỹ B'):
+        r=auth_post(client,'/api/stashes',{'name':n,'auto_mode':'fixed','auto_value':200000,
+                  'min_wallet_balance':100000},csrf=csrf)
+        assert r.status_code==200,r.text
+    inc=next(c['id'] for c in client.get('/api/categories').json() if c['kind']=='income')
+    r=auth_post(client,'/api/transactions',{'title':'Thưởng','kind':'income','amount':250000,
+         'wallet_id':wid,'category_id':inc,'occurred_on':'2026-11-09'},csrf=csrf)
+    assert r.status_code==200,r.text
+    assert r.json()['debt_paid']==0 and r.json()['auto_saved']==250000
+    assert client.get('/api/wallets').json()['total_balance']==100000
+    assert client.get('/api/stashes').json()['total_saved']==250000
+    assert client.get('/api/dashboard?month=2026-11').json()['total_assets']==350000

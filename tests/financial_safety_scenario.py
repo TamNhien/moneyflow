@@ -96,6 +96,8 @@ def main():
             w=db.get(Wallet,wallet)
             assert wallet_balance(db,w)>=0
 
+        # Legacy behavior is opt-in since v1.0.28.
+        expect(req('PUT','/api/settings/auto-debt',{'enabled':True}))
         # One income may repay principal AND reserve funds. A retry must not
         # repeat either side effect, even when all allocations are automatic.
         expect(req('PUT',f'/api/stashes/{fund}', {

@@ -1,4 +1,4 @@
-/* MoneyFlow v1.0.27: PWA install and opt-in generic desktop reminders. */
+/* MoneyFlow v1.0.28: PWA install and opt-in generic desktop reminders. */
 'use strict';
 (() => {
   let installPrompt = null;

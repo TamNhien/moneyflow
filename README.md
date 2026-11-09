@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.27
+# MoneyFlow Local v1.0.28
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, **gợi ý danh mục từ lịch sử và phân tích thói quen chi tiêu**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -66,6 +66,28 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.28 — Xóa ví an toàn, định dạng VNĐ, lãi suất %, trả nợ tự chọn và quỹ để dành (mới)
+
+- **Khắc phục thu nhập bị tự trừ nợ:** tài khoản cũ và mới được chuyển sang chế độ **tắt tự trả nợ từ thu nhập theo mặc định** khi cập nhật. Mở **Quản lý nợ → Bật tự trả nợ** nếu muốn phân bổ thu nhập mới cho gốc nợ phải trả theo thứ tự đã tạo; có thể tắt lại ngay. API `PUT /api/settings/auto-debt` yêu cầu JSON `{"enabled":true/false}` và bảo vệ CSRF. Thao tác này **không thay đổi các khoản trả nợ đã ghi trước đây**, và không hạch toán lại thu nhập cũ. Nếu tự tích để dành đang bật, quỹ vẫn có thể giữ lại tiền từ thu nhập theo quy tắc riêng; nếu muốn giữ nguyên toàn bộ thu nhập trong ví, tắt cả tính năng tự tích của các quỹ.
+- **Xóa ví:** nút **Xóa ví** có trên mọi ví phụ, kể cả ví đã khóa. Endpoint `DELETE /api/wallets/{id}` chỉ xóa khi cả **số dư ban đầu = 0**, **số dư hiện tại = 0**, và **không còn tham chiếu** trong sổ thu/chi, trả nợ, chuyển ví, tiết kiệm, quỹ, giao dịch định kỳ hoặc lịch sử đối soát. Cấm xóa ví chính và ví của tài khoản khác. Ví đã dùng dù hết tiền nên chọn **Khóa ví**, bảo toàn sổ tài chính. Xóa ví sẽ không tự chuyển tiền sang ví khác.
+- **Định dạng tiền:** giá trị hiển thị và các ô nhập tiền dùng **dấu phẩy mỗi ba chữ số** (`20,000,000 ₫`); trong biểu mẫu dùng ô text số với inputmode numeric và chuẩn hóa bỏ dấu phẩy trước khi gửi API. Các trường ngày tháng, số kỳ góp, lãi suất % vẫn dùng kiểu nhập phù hợp, không làm tròn âm thầm số tiền.
+- **Tiền lãi là %:** khi trả/thu hồi nợ thủ công, nhập **lãi suất của kỳ thanh toán (%)**, tối đa 2 chữ số thập phân. Tiền lãi thực tế trong DB = `ROUND_HALF_UP(gốc thanh toán × % / 100)`, làm tròn về VNĐ. Ví dụ thanh toán gốc `20,000,000` với lãi `10%` thì lãi `2,000,000`, tổng trừ ví `22,000,000`. Định nghĩa **lãi của lần thanh toán** này khác với **lãi suất năm** dùng cho lịch trả góp ước tính. API tiếp tục chấp nhận `interest_amount` bằng VNĐ từ client cũ để tương thích, nhưng không cho gửi cùng lúc với `interest_rate_pct` khác 0.
+- **Giữ tiền sinh hoạt khi tự tích lũy:** mỗi quỹ linh hoạt có trường **Giữ tối thiểu trong ví sau khi tự để dành (VNĐ)** (`min_wallet_balance`). Sau khi ghi nhận thu nhập và trả nợ nếu đã bật, mỗi quy tắc chỉ trích tối đa `min(mục tiêu quỹ, thu nhập còn lại, số dư ví trước trích − mức tối thiểu)`. Những quy tắc tạo trước tiếp tục mặc định `0`, dữ liệu quỹ và số dư cũ không bị sửa. Dự báo 30/60/90 ngày dùng cùng chế độ trả nợ có/không và mức tiền tối thiểu theo quỹ.
+- **Database:** migration tăng dần, **chỉ thêm** `users.auto_repay_debts BOOLEAN NOT NULL DEFAULT FALSE` và `stash_funds.min_wallet_balance BIGINT NOT NULL DEFAULT 0`. Không xóa bảng cũ, không tự hoàn tác các thanh toán cũ. Các bước chạy test, build, GitHub Release và kiểm tra package tự động từ v1.0.24 vẫn giữ nguyên.
+- **Kiểm thử:** SQLite API/migration, đối soát thu nhập bật/tắt, lãi 10%, xóa ví trống/khóa bảo toàn tham chiếu, giữ số dư tối thiểu, chống idempotency; frontend smoke kiểm tra định dạng `20,000,000`, nút xóa ví, ô lãi suất và tự tích. Bài PostgreSQL riêng bắt buộc chạy trong GitHub Actions CI/Release; tại môi trường không có PostgreSQL, test này bị skip.
+
+**Chạy thử, build và phát hành GitHub:**
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\test.ps1
+.\scripts\run.ps1
+.\scripts\publish.ps1 -Version 1.0.28
+```
+
+---
 
 ## v1.0.27 — An toàn giao dịch và lịch sử chỉnh sửa (mới)
 
@@ -164,7 +186,7 @@ Trang **Đối soát tài chính** trên menu hỗ trợ theo dõi sổ tiền M
 ## v1.0.18 — Dự báo dòng tiền và cảnh báo thiếu tiền (đọc, không ghi dữ liệu)
 
 - Thêm trang **Dự báo dòng tiền**: xem 30/60/90 ngày theo các lịch thu/chi định kỳ còn hoạt động. Hiển thị đường dự kiến tổng số dư khả dụng, các kỳ thu/chi, số dư dự kiến cuối kỳ và từng ví.
-- Các khoản thu dự kiến được mô phỏng **ưu tiên trả nợ gốc phải trả** theo thứ tự nợ cũ trước; chỉ phần dư mới vào ví. Không giả lập tự trả lãi, thu hồi nợ hay chuyển khoản bên ngoài; nợ đến hạn tiếp tục nằm trong khu vực nhắc lịch và **không bị trừ thêm** trong dự báo.
+- Khi **Bật tự trả nợ** (v1.0.28), các khoản thu dự kiến ưu tiên trả nợ gốc theo thứ tự; khi tắt, dự báo giữ thu nhập trong ví (sau phần tự tích quỹ nếu có). Không giả lập tự trả lãi, thu hồi nợ hay chuyển khoản bên ngoài; nợ đến hạn tiếp tục nằm trong khu vực nhắc lịch và **không bị trừ thêm** trong dự báo.
 - Phát hiện nguy cơ **âm từng ví**, kể cả khi tổng số dư các ví còn dương; đánh dấu ngày đầu có rủi ro. Dữ liệu thật **không bị sửa**, kể cả khi số dư dự kiến âm; quy tắc chặn chi vượt tiền vẫn hoạt động như trước.
 - Những kỳ quá hạn chưa xử lý được báo riêng, không giả vờ đã thanh toán hôm nay. Lịch gắn ví đang khóa được cảnh báo và loại khỏi dự báo. Chuyển tiền nội bộ và góp/rút quỹ tiết kiệm không bị nhận nhầm thành thu/chi.
 - API chỉ đọc `GET /api/forecast?days=30|60|90`, yêu cầu đăng nhập; trả header `Cache-Control: no-store`. Không thay schema database và không tạo giao dịch; các mốc dự báo phụ thuộc vào giả định lịch sẽ diễn ra đúng hạn, không phải cam kết số dư thực tế.
@@ -200,7 +222,7 @@ Trang **Đối soát tài chính** trên menu hỗ trợ theo dõi sổ tiền M
 - **Lãi suất năm:** nhập từ 0–100%/năm (tối đa hai chữ số thập phân); lập lịch *tham khảo* tính theo **dư nợ giảm dần, chia đều tiền gốc theo từng tháng**. Chưa hỗ trợ lãi kép, thay đổi lãi theo kỳ, ngày thực tế/365, phí trả chậm hoặc điều kiện ngân hàng đặc thù.
 - **Trả góp:** 1–360 kỳ, yêu cầu ngày đến hạn kỳ đầu với nhiều kỳ; xem từng kỳ gồm hạn trả, gốc kế hoạch, lãi ước tính, tổng ước tính và tiến độ gốc. Gốc/lãi ước tính **không tự ghi bút toán** vào ví; khoản thu/chi thực tế chỉ phát sinh khi người dùng xác nhận.
 - **Thanh toán thực tế:** ghi **gốc** (bắt buộc lớn hơn 0) và **lãi thực trả/thu** riêng. Nợ phải trả: ví trừ *(gốc + lãi)*; nợ phải thu: ví cộng *(gốc + lãi)*; **chỉ tiền gốc làm giảm dư nợ**. Không nhập cùng khoản thu hồi nợ vào mục “Thu nhập” lần nữa vì sẽ tính trùng tiền.
-- **Tự trừ nợ giữ nguyên:** các khoản **Thu nhập mới** chỉ tự trả **nợ phải trả** theo thứ tự tạo trước, mặc định trả **gốc**, không tự tính hay trừ lãi. Nợ phải thu chỉ giảm khi chọn **Thu hồi** trong Quản lý nợ.
+- **Tự trừ nợ từ v1.0.28 phải được bật thủ công:** các khoản **Thu nhập mới** chỉ tự trả **nợ phải trả** theo thứ tự tạo trước, mặc định trả **gốc**, không tự tính hay trừ lãi. Nợ phải thu chỉ giảm khi chọn **Thu hồi** trong Quản lý nợ.
 - **An toàn sổ sách:** giới hạn tổng thanh toán không vượt trần; không thể thanh toán vượt dư nợ gốc, trả nợ khi ví không đủ tiền hoặc hoàn tác khoản thu hồi đã sử dụng hết. Khoản nợ đã có thanh toán khóa các điều khoản trọng yếu (gốc, chiều nợ, lãi suất, số kỳ và lịch); vẫn sửa được tên/đối tác/ghi chú. Không xóa khoản có lịch sử thanh toán.
 - **Tổng quan:** nợ phải trả, nợ phải thu và **tài sản ròng = tổng số dư ví − nợ phải trả + nợ phải thu** (chưa gồm tài sản/nghĩa vụ khác). Tiền lãi thực thu/trả của các khoản nợ hiển thị riêng, không tự ghi vào thống kê danh mục thu/chi.
 - **Migration không phá dữ liệu:** cột mới trên `debts` là `direction`, `annual_rate_bps`, `installment_count`; trên `debt_payments` là `interest_amount`. Nợ từ v1.0.11 hoặc cũ hơn mặc định **phải trả, 0%/năm, 1 kỳ, lãi thực tế 0**; ví/giao dịch/tiền đã trả nợ cũ vẫn được giữ nguyên. Migration được kiểm thử lặp lại trên SQLite; PostgreSQL Windows/Docker thực tế cần xác nhận sau khi chạy.
@@ -226,7 +248,7 @@ Trang **Đối soát tài chính** trên menu hỗ trợ theo dõi sổ tiền M
 - **Tiền ban đầu và số dư:** số dư = tiền gốc + thu nhập − chi tiêu − trả nợ gốc/lãi + tiền thu hồi nợ gốc/lãi. Các lần chuyển ví không làm thay đổi tổng số dư. Chặn thao tác khiến từng ví âm.
 - **Giao dịch thu/chi:** thêm, sửa, xóa, lọc theo tháng, danh mục; xuất CSV UTF-8 BOM.
 - **Quản lý nợ:** nợ phải trả/phải thu, người vay/cho vay, lịch trả góp, lãi suất ước tính, lịch sử gốc và lãi thực tế; có thu hồi/trả thủ công và hoàn tác khi hợp lệ.
-- **Tự trừ nợ khi thu nhập mới:** khoản tiền mới chỉ phân bổ trả **nợ phải trả** theo thứ tự tạo trước; phần dư mới tăng số dư. Không trừ hồi tố các giao dịch thu nhập cũ, không tính trả nợ gốc như chi phí sinh hoạt.
+- **Tự trừ nợ khi thu nhập mới nếu đã bật tùy chọn v1.0.28:** khoản tiền mới chỉ phân bổ trả **nợ phải trả** theo thứ tự tạo trước; phần dư mới tăng số dư. Không trừ hồi tố các giao dịch thu nhập cũ, không tính trả nợ gốc như chi phí sinh hoạt.
 - **Giao dịch định kỳ và nhắc lịch:** lịch lương, tiền nhà, điện nước theo ngày/tuần/tháng/năm; xác nhận thủ công hoặc tự ghi, nhắc sắp đến hạn; lịch sử kỳ đã xử lý.
 - **Thống kê:** tổng thu/chi, biến động 6 tháng, biểu đồ tròn chia từ tâm theo danh mục, ngân sách, số nợ và tài sản ròng.
 - **Tài khoản:** username, email, điện thoại Việt Nam dạng `0...` (tự nhận `+84`, `84`, `0084`), địa chỉ; phân quyền Admin/Member, khóa tài khoản, nhật ký hệ thống. Tài khoản có sổ giao dịch riêng.
@@ -335,6 +357,7 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 
 | Phiên bản | Nội dung |
 |---|---|
+| **v1.0.28** | **Xóa ví phụ trống chưa có lịch sử, định dạng VNĐ có dấu phẩy, lãi thủ công theo % gốc từng lần thanh toán, tự trả nợ từ thu nhập mặc định tắt, giữ số dư ví tối thiểu cho quỹ tự tích và dự báo khớp quy tắc.** |
 | v1.0.0 | Quản lý thu/chi, số dư, danh mục, ngân sách, dashboard và tài khoản. |
 | v1.0.1 | PostgreSQL host 5435 và giao diện đăng nhập nền tối. |
 | v1.0.2 | Hồ sơ email/điện thoại/địa chỉ, độ mạnh mật khẩu, khôi phục qua SMTP. |
@@ -370,7 +393,7 @@ Mở **Tiền tích để dành** trên menu. Tạo quỹ linh hoạt (ví dụ 
 ## v1.0.20 — Tự động tích để dành từ mỗi khoản thu
 
 - Mở **Tiền tích để dành** → **Tạo quỹ để dành** hoặc **Sửa** quỹ đang có. Ở mục **Tự động tích lũy khi nhận thu nhập**, chọn **Tắt**, **Theo % thu nhập sau trả nợ** (từ **1–100%**) hoặc **Số tiền cố định (VNĐ)**. Có thể chọn chỉ áp dụng cho một ví nhận tiền hoặc tất cả các ví. **Mặc định Tắt** để không tự trích tiền khi người dùng chưa chủ động bật.
-- Khi thêm khoản **Thu nhập mới** (kể cả xác nhận/giao dịch tự động từ lịch định kỳ), MoneyFlow ưu tiên trả **nợ gốc phải trả** như trước. Từ phần thu nhập còn lại, hệ thống áp dụng các quỹ đang bật theo **thứ tự quỹ được tạo**, tính tỷ lệ trên phần thu nhập sau trả nợ (không tính trên tổng số tiền trong ví), sau đó giới hạn theo số còn chưa được phân bổ. Mức cố định cũng chỉ trích tối đa số tiền còn lại. Không trích từ tiền gốc đã có, khoản chuyển giữa ví, tiền thu hồi nợ hoặc khoản chi.
+- Khi thêm khoản **Thu nhập mới** (kể cả xác nhận/giao dịch tự động từ lịch định kỳ), MoneyFlow chỉ trả **nợ gốc phải trả** nếu bật tùy chọn v1.0.28. Từ phần thu nhập còn lại, hệ thống áp dụng các quỹ đang bật theo **thứ tự quỹ được tạo**, tính tỷ lệ trên phần thu nhập sau trả nợ (không tính trên tổng số tiền trong ví), sau đó giới hạn theo số còn chưa được phân bổ. Mức cố định cũng chỉ trích tối đa số tiền còn lại. Không trích từ tiền gốc đã có, khoản chuyển giữa ví, tiền thu hồi nợ hoặc khoản chi.
 - Ví dụ có lương mới **10.000.000đ**, trừ nợ gốc **2.000.000đ** → thu nhập sau nợ còn **8.000.000đ**. Quỹ A cài **20%** được **1.600.000đ**, quỹ B cố định **1.000.000đ** được **1.000.000đ**; số tiền thực cộng thêm vào ví là **5.400.000đ**. Tiền chuyển vào các quỹ vẫn nằm trong tổng tài sản và **không được tính là chi tiêu**.
 - Lịch sử quỹ ghi rõ **Tự động tích lũy** hay **Thủ công**, có liên kết nội bộ tới giao dịch thu nguồn để ngăn bút toán trùng (chỉ một bút toán tự động/quỹ/giao dịch). **Chỉ các khoản thu được ghi sau khi bật quy tắc** mới áp dụng tự động; tiền thu nhập đã lưu trước đó không bị trích hồi tố.
 - Khi sửa hoặc xóa khoản thu có tiền tích tự động, chương trình chỉ hoàn tác các bút toán tự động của chính khoản thu đó, phục hồi nợ gốc và đánh giá lại quy tắc. Nếu đã rút tiền từ quỹ khiến không đủ để hoàn tác, hệ thống **chặn thao tác** và giữ nguyên toàn bộ số dư; cần góp hoàn tiền vào quỹ trước.
