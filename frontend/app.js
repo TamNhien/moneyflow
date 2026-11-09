@@ -26,15 +26,38 @@ const thisMonth = () => today().slice(0,7);
 const monthText = m => {const [y,mo]=m.split('-');return `Tháng ${+mo}/${y}`};
 const pct=(a,b)=>b>0?Math.round(a/b*100):0;
 const state={user:null,csrf:null,loginTicket:null,needsSetup:false,authMode:'login',resetToken:null,page:'dashboard',month:thisMonth(),categories:[],transPage:1,transKind:'',transCategory:'',transSearch:'',transWallet:'',receiptSearch:'',receiptKind:'',receiptMonth:'',receiptPage:1,wallets:[],data:null,reminders:[],recurringData:null,reportMonths:12,annualYear:new Date().getFullYear(),forecastDays:30,insightMonths:6};
-const PAGE_NAMES={insights:'Thói quen chi tiêu',annual:'Thống kê theo năm',forecast:'Dự báo dòng tiền',reports:'Báo cáo tài chính',recurring:'Định kỳ & nhắc lịch',wallets:'Ví & tài khoản',stashes:'Tiền tích để dành',savings:'Mục tiêu tiết kiệm',dashboard:'Tổng quan',transactions:'Giao dịch',receipts:'Hóa đơn & chứng từ',reconciliation:'Đối soát tài chính',budgets:'Ngân sách',debts:'Quản lý nợ',categories:'Danh mục',settings:'Cài đặt',users:'Người dùng',audit:'Nhật ký hệ thống'};
+const PAGE_NAMES={history:'Lịch sử giao dịch',insights:'Thói quen chi tiêu',annual:'Thống kê theo năm',forecast:'Dự báo dòng tiền',reports:'Báo cáo tài chính',recurring:'Định kỳ & nhắc lịch',wallets:'Ví & tài khoản',stashes:'Tiền tích để dành',savings:'Mục tiêu tiết kiệm',dashboard:'Tổng quan',transactions:'Giao dịch',receipts:'Hóa đơn & chứng từ',reconciliation:'Đối soát tài chính',budgets:'Ngân sách',debts:'Quản lý nợ',categories:'Danh mục',settings:'Cài đặt',users:'Người dùng',audit:'Nhật ký hệ thống'};
 
+// Retry after lost connectivity reuses the same request ID rather than writing twice.
+// No financial information is persisted in the PWA cache or browser storage.
+const pendingFinancialRequests = new Map();
+function financialIdempotencyId(){
+  if(typeof crypto!=='undefined' && typeof crypto.randomUUID==='function')return crypto.randomUUID();
+  return String(Date.now())+'-'+Math.random().toString(36).slice(2)+'-'+Math.random().toString(36).slice(2);
+}
 async function api(path, options={}) {
   const headers={...(options.headers||{})};
+  const method=String(options.method||'GET').toUpperCase();
+  const route=path.replace(/^\//,'');
+  const isFinancialMutation =
+    (method==='POST' && (route==='transactions'||route==='wallet-transfers'||
+      /^debts\/\d+\/payments$/.test(route)||/^(savings|stashes)\/\d+\/movements$/.test(route)))||
+    (['PUT','DELETE'].includes(method)&&/^transactions\/\d+$/.test(route));
+  let requestSignature=null;
+  if(isFinancialMutation){
+    requestSignature=JSON.stringify([method,route,options.body??'']);
+    let previous=pendingFinancialRequests.get(requestSignature);
+    if(previous && Date.now()-previous.at>300000){pendingFinancialRequests.delete(requestSignature);previous=null;}
+    const id=previous?.id||financialIdempotencyId();
+    pendingFinancialRequests.set(requestSignature,{id,at:Date.now()});
+    headers['X-Idempotency-Key']=id;
+  }
   if(options.body!==undefined)headers['Content-Type']='application/json';
   if(state.csrf && options.method && !['GET','HEAD'].includes(options.method))headers['X-CSRF-Token']=state.csrf;
   let r;
   try {r=await fetch('/api/'+path.replace(/^\//,''),{...options,headers,credentials:'same-origin'});} catch {throw new Error('Không thể kết nối máy chủ. Hãy kiểm tra Docker đang chạy.');}
-  if(!r.ok){let err={};try{err=await r.json()}catch{};if(r.status===401&&state.user){state.user=null;showAuth();throw new Error('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.')}throw new Error(typeof err.detail==='string'?err.detail:'Yêu cầu không thành công.');}
+  if(!r.ok){if(requestSignature)pendingFinancialRequests.delete(requestSignature);let err={};try{err=await r.json()}catch{};if(r.status===401&&state.user){state.user=null;showAuth();throw new Error('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.')}throw new Error(typeof err.detail==='string'?err.detail:'Yêu cầu không thành công.');}
+  if(requestSignature)pendingFinancialRequests.delete(requestSignature);
   return r.headers.get('content-type')?.includes('application/json')?r.json():r;
 }
 function toast(message,error=false){const r=$('#toast-root');r.innerHTML=`<div class="toast ${error?'error':''}">${esc(message)}</div>`;clearTimeout(toast.timer);toast.timer=setTimeout(()=>r.innerHTML='',4200)}
@@ -73,6 +96,7 @@ function checkPasswordConfirmation(password, confirmation){
   if(password!==confirmation)throw new Error('Mật khẩu xác nhận không trùng khớp.');
 }
 function showAuth(mode=null){
+  pendingFinancialRequests.clear(); // avoid retaining a previous account's retry data
   $('#shell').hidden=true;$('#auth-screen').hidden=false;$('#modal-root').innerHTML='';
   if(mode)state.authMode=mode;
   else if(state.authMode!=='reset')state.authMode=state.needsSetup?'setup':'login';
@@ -385,8 +409,20 @@ async function fetchCategorySuggestions(){
  container.innerHTML=result.items.length?`<div class="insight-suggestions">${result.items.map(x=>`<button type="button" class="insight-suggestion" data-action="use-category-suggestion" data-id="${x.category_id}"><strong>${esc(x.category)}</strong><small>${x.examples} giao dịch tương tự · ${x.strength==='cao'?'Gợi ý mạnh':'Tham khảo'}</small></button>`).join('')}</div><small>Chọn một gợi ý nếu phù hợp. Chỉ lưu khi bạn bấm Lưu giao dịch.${result.sample_limited?' Chỉ xét 800 giao dịch gần nhất.':''}</small>`:'<span class="form-help">Chưa tìm thấy giao dịch tương tự; vui lòng chọn danh mục thủ công.</span>';
 }
 
+function revisionSummary(v){
+ if(!v)return '<span class="meta">—</span>';
+ return `<strong>${esc(v.title||'')}</strong><small>${esc(v.occurred_on)} · ${v.kind==='income'?'Thu':'Chi'} · ${fmoney(v.amount)} · Ví #${Number(v.wallet_id)||0}</small><small>Trả nợ tự động: ${fmoney(v.allocated_debt_principal||0)} · Tự để dành: ${fmoney(v.allocated_stash||0)}</small>`;
+}
+async function renderHistory(){
+ const qs=new URLSearchParams({limit:'100'});
+ if(state.historyEntryId)qs.set('entry_id',String(state.historyEntryId));
+ const d=await api('transactions/revisions?'+qs);
+ const rows=d.items.map(r=>`<tr><td><b>#${r.entry_id}</b></td><td>${esc(r.created_at.slice(0,19).replace('T',' '))}</td><td><span class="tag ${r.operation==='delete'?'tag-disabled':'tag-active'}">${r.operation==='create'?'Tạo':r.operation==='update'?'Sửa':'Xóa'}</span></td><td>${revisionSummary(r.before)}</td><td>${revisionSummary(r.after)}</td></tr>`).join('');
+ $('#page-content').innerHTML=heading('Lịch sử chỉnh sửa giao dịch','Lưu thông tin trước và sau khi tạo, sửa hoặc xóa giao dịch. Chỉ xem, không chỉnh sửa sổ tiền.',`<button class="btn btn-secondary" data-page="transactions">← Danh sách giao dịch</button>`)+
+ `<section class="panel full-panel"><div class="toolbar"><label>Mã giao dịch <input id="history-entry-filter" class="input" type="number" min="1" placeholder="Tất cả" value="${state.historyEntryId||''}"/></label><button class="btn btn-secondary" data-action="history-filter">Lọc lịch sử</button><button class="btn btn-secondary" data-action="history-clear">Tất cả</button></div><p class="panel-sub">Hiển thị tối đa 100 thay đổi mới nhất. Bản ghi cũ trước v1.0.27 không có lịch sử chi tiết.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>GIAO DỊCH</th><th>THỜI ĐIỂM</th><th>THAO TÁC</th><th>TRƯỚC</th><th>SAU</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="table-row-empty">Chưa có lịch sử thay đổi.</td></tr>'}</tbody></table></div></section>`;
+}
 async function renderTransactions(){let query=new URLSearchParams({page:String(state.transPage),size:'15'});if(state.month)query.set('month',state.month);if(state.transKind)query.set('kind',state.transKind);if(state.transCategory)query.set('category_id',state.transCategory);if(state.transWallet)query.set('wallet_id',state.transWallet);if(state.transSearch)query.set('q',state.transSearch);const d=await api('transactions?'+query);state.transData=d;
- $('#page-content').innerHTML=heading('Quản lý giao dịch','Theo dõi, tìm kiếm và chỉnh sửa mọi khoản thu chi.',`<button class="btn btn-secondary" data-action="export">↓ Xuất Excel / CSV</button>${addButton()}`)+`<section class="panel full-panel"><div class="toolbar"><input id="search-trans" class="input search-input" placeholder="⌕ Tìm theo nội dung..." value="${esc(state.transSearch)}"/><select id="filter-type" class="select"><option value="">Tất cả loại</option><option value="income" ${state.transKind==='income'?'selected':''}>Khoản thu</option><option value="expense" ${state.transKind==='expense'?'selected':''}>Khoản chi</option></select><select id="filter-category" class="select"><option value="">Tất cả danh mục</option>${state.categories.filter(c=>c.active).map(c=>`<option value="${c.id}" ${String(c.id)===state.transCategory?'selected':''}>${esc(c.name)} (${c.kind==='income'?'Thu':'Chi'})</option>`).join('')}</select><select id="filter-wallet" class="select"><option value="">Tất cả ví</option>${state.wallets.map(w=>`<option value="${w.id}" ${String(w.id)===state.transWallet?'selected':''}>${esc(w.name)}</option>`).join('')}</select><button class="btn btn-secondary" data-action="search-trans">Tìm kiếm</button></div><div class="stats-line"><span>Tổng số giao dịch: <b>${d.total}</b></span><span>Tháng: <b>${monthText(state.month)}</b></span></div>${tableHtml(d.items,true)}<div class="pagination"><span>Trang ${d.page}/${d.pages} · ${d.total} giao dịch</span><div class="pagination-actions"><button data-action="page-prev" ${d.page<=1?'disabled':''}>← Trước</button><button data-action="page-next" ${d.page>=d.pages?'disabled':''}>Sau →</button></div></div></section>`;}
+ $('#page-content').innerHTML=heading('Quản lý giao dịch','Theo dõi, tìm kiếm và chỉnh sửa mọi khoản thu chi.',`<button class="btn btn-secondary" data-page="history">◴ Lịch sử chỉnh sửa</button><button class="btn btn-secondary" data-action="export">↓ Xuất Excel / CSV</button>${addButton()}`)+`<section class="panel full-panel"><div class="toolbar"><input id="search-trans" class="input search-input" placeholder="⌕ Tìm theo nội dung..." value="${esc(state.transSearch)}"/><select id="filter-type" class="select"><option value="">Tất cả loại</option><option value="income" ${state.transKind==='income'?'selected':''}>Khoản thu</option><option value="expense" ${state.transKind==='expense'?'selected':''}>Khoản chi</option></select><select id="filter-category" class="select"><option value="">Tất cả danh mục</option>${state.categories.filter(c=>c.active).map(c=>`<option value="${c.id}" ${String(c.id)===state.transCategory?'selected':''}>${esc(c.name)} (${c.kind==='income'?'Thu':'Chi'})</option>`).join('')}</select><select id="filter-wallet" class="select"><option value="">Tất cả ví</option>${state.wallets.map(w=>`<option value="${w.id}" ${String(w.id)===state.transWallet?'selected':''}>${esc(w.name)}</option>`).join('')}</select><button class="btn btn-secondary" data-action="search-trans">Tìm kiếm</button></div><div class="stats-line"><span>Tổng số giao dịch: <b>${d.total}</b></span><span>Tháng: <b>${monthText(state.month)}</b></span></div>${tableHtml(d.items,true)}<div class="pagination"><span>Trang ${d.page}/${d.pages} · ${d.total} giao dịch</span><div class="pagination-actions"><button data-action="page-prev" ${d.page<=1?'disabled':''}>← Trước</button><button data-action="page-next" ${d.page>=d.pages?'disabled':''}>Sau →</button></div></div></section>`;}
 async function renderBudgets(){
  const d=await api(`budgets/insights?month=${encodeURIComponent(state.month)}`);
  state.budgetData=d.items;
@@ -569,7 +605,7 @@ const walletName=id=>state.wallets.find(w=>w.id===Number(id))?.name||'Ví chính
 function walletChoices(selected=null){const chosen=selected??state.wallets.find(w=>w.is_default)?.id;return state.wallets.filter(w=>w.active||w.id===Number(chosen)).map(w=>`<option value="${w.id}" ${w.id===Number(chosen)?'selected':''}>${esc(w.name)} (${fmoney(w.balance)})</option>`).join('')}
 function walletSelect(selected=null,label='Ví tiền'){return `<label>${esc(label)}<select class="select" name="wallet_id" required>${walletChoices(selected)}</select></label>`}
 async function navigate(page){if(!PAGE_NAMES[page] || ((page==='users'||page==='audit')&&state.user.role!=='admin'))return;state.page=page;$$('[data-page]', $('#main-nav')).forEach(x=>x.classList.toggle('active',x.dataset.page===page));$('#breadcrumb-current').textContent=PAGE_NAMES[page];$('#header-month-label').textContent=monthText(state.month);$('#page-content').innerHTML='<div class="skeleton">Đang tải dữ liệu...</div>';$('#sidebar').classList.remove('open');$('#mobile-overlay').hidden=true;
- try {await refreshCategories();await refreshWallets();await refreshReminders();switch(page){case 'insights':await renderSpendingInsights();break;case 'forecast':await renderForecast();break;case 'reports':await renderReports();break;case 'annual':await renderAnnual();break;case 'wallets':await renderWallets();break;case 'savings':await renderSavings();break;case 'stashes':await renderStashes();break;case 'recurring':await renderRecurring();break;case 'dashboard':await renderDashboard();break;case 'transactions':await renderTransactions();break;case 'receipts':await renderReceipts();break;case 'reconciliation':await renderReconciliation();break;case 'budgets':await renderBudgets();break;case 'debts':await renderDebts();break;case 'categories':await renderCategories();break;case 'settings':await renderSettings();break;case 'users':await renderUsers();break;case 'audit':await renderAudit();break;}}
+ try {await refreshCategories();await refreshWallets();await refreshReminders();switch(page){case 'insights':await renderSpendingInsights();break;case 'forecast':await renderForecast();break;case 'reports':await renderReports();break;case 'annual':await renderAnnual();break;case 'wallets':await renderWallets();break;case 'savings':await renderSavings();break;case 'stashes':await renderStashes();break;case 'recurring':await renderRecurring();break;case 'dashboard':await renderDashboard();break;case 'transactions':await renderTransactions();break;case 'history':await renderHistory();break;case 'receipts':await renderReceipts();break;case 'reconciliation':await renderReconciliation();break;case 'budgets':await renderBudgets();break;case 'debts':await renderDebts();break;case 'categories':await renderCategories();break;case 'settings':await renderSettings();break;case 'users':await renderUsers();break;case 'audit':await renderAudit();break;}}
  catch(e){$('#page-content').innerHTML=`<section class="panel">${empty('Không thể tải dữ liệu',e.message)}</section>`;toast(e.message,true)}}
 function openModal(title,subtitle,body,formName,submit='Lưu thay đổi'){$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><div class="modal-header"><div><h2 id="dialog-title">${esc(title)}</h2><p>${esc(subtitle)}</p></div><button class="close-modal" data-action="close-modal" aria-label="Đóng">✕</button></div><form id="modal-form" data-form="${esc(formName)}"><div class="modal-body">${body}<div class="form-error" id="modal-error"></div></div><div class="modal-footer"><button class="btn btn-secondary" type="button" data-action="close-modal">Hủy</button><button class="btn btn-primary" type="submit">${esc(submit)}</button></div></form></section></div>`;setTimeout(()=>$('#modal-form input:not([type="hidden"])')?.focus(),0)}
 function closeModal(){if(currentReceiptPreview){URL.revokeObjectURL(currentReceiptPreview);currentReceiptPreview=null;}$('#modal-root').innerHTML=''}
@@ -703,6 +739,8 @@ case 'receipt-preview':await receiptPreview(id);break;
 case 'receipt-delete':if(confirm('Xóa vĩnh viễn chứng từ này? Giao dịch thu/chi sẽ không bị xóa.')){await api(`receipts/${id}`,{method:'DELETE',body:'{}'});toast('Đã xóa chứng từ.');if(state.page==='receipts'){await navigate('receipts')}else{const entryId=Number(el.dataset.entry);await navigate('transactions');await openReceiptsModal(entryId)}}break;
 case 'close-modal':closeModal();break;case 'add-entry':entryModal();break;case 'add-income':entryModal(null,'income');break;case 'edit-entry':{const found=state.transData?.items?.find(x=>x.id===id);if(found)entryModal(found);break}case 'delete-entry':if(confirm('Xóa giao dịch này? Số dư sẽ được tính lại.')){await api(`transactions/${id}`,{method:'DELETE',body:'{}'});toast('Đã xóa giao dịch!');await navigate(state.page)}break;
 case 'export':{const r=await fetch(`/api/export.csv?month=${encodeURIComponent(state.month)}`,{credentials:'same-origin'});if(!r.ok)throw Error('Không thể xuất dữ liệu.');const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`moneyflow-${state.month}.csv`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Đã xuất file CSV.');break}
+case 'history-filter':{const value=$('#history-entry-filter')?.value?.trim()||'';state.historyEntryId=/^[1-9]\d*$/.test(value)?Number(value):0;await navigate('history');break;}
+case 'history-clear':state.historyEntryId=0;await navigate('history');break;
 case 'search-trans':state.transSearch=$('#search-trans')?.value?.trim()||'';state.transPage=1;await navigate('transactions');break;
 case 'page-prev':state.transPage=Math.max(1,state.transPage-1);await navigate('transactions');break;case 'page-next':state.transPage++;await navigate('transactions');break;
 case 'recurring-add':recurringModal();break;

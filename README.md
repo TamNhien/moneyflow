@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.26
+# MoneyFlow Local v1.0.27
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, **gợi ý danh mục từ lịch sử và phân tích thói quen chi tiêu**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -66,6 +66,24 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.27 — An toàn giao dịch và lịch sử chỉnh sửa (mới)
+
+- **Chống gửi trùng có kiểm tra nội dung:** những API tạo giao dịch, chuyển tiền giữa ví, trả nợ thủ công, góp/rút mục tiêu và quỹ để dành nhận `X-Idempotency-Key` tùy chọn (16–128 ký tự chữ/số/gạch ngang/gạch dưới). Các yêu cầu cùng tài khoản + mã + nội dung trả đúng kết quả cũ, không ghi tiền hai lần. Cùng mã nhưng nội dung/đường dẫn khác trả `409`. Frontend tự tạo mã cho mỗi thao tác và giữ mã đó nếu lần gửi trước bị mất kết nối; không cache số liệu tài chính trong trình duyệt. Đã hỗ trợ cả sửa/xóa giao dịch.
+- **Atomic commit:** bản ghi mã yêu cầu và các khoản thu/chi, chuyển ví, trả nợ, góp quỹ nằm trong **cùng transaction SQL**. Cơ chế khóa hàng `users` có sẵn trên PostgreSQL giúp nối tiếp các thao tác cùng chủ tài khoản; SQLite test không tương đương kiểm thử đồng thời PostgreSQL.
+- **Lịch sử giao dịch:** thêm bảng `transaction_revisions` ghi ảnh chụp trước/sau mỗi lần tạo/sửa/xóa giao dịch thu chi kể từ v1.0.27 (kể cả giao dịch ghi bởi lịch định kỳ). Thể hiện số tiền, loại giao dịch, ngày, ví, danh mục và phần phân bổ trả nợ/để dành. Lịch sử vẫn còn khi giao dịch bị xóa; không tạo lại lịch sử cho bản ghi cũ. Xem tại **Lịch sử giao dịch** hoặc `GET /api/transactions/revisions?entry_id=...&limit=...` (mặc định 80, tối đa 200), chỉ thuộc tài khoản đăng nhập.
+- **Database:** thêm hai bảng `financial_operations` và `transaction_revisions` bằng migration `create_all` không phá dữ liệu, có ràng buộc unique `(user_id,key_hash)`. Khi quản trị xóa người dùng, lịch sử và mã của người đó được xóa theo. Chưa đặt hạn dọn bản ghi idempotency: cần lên kế hoạch lưu trữ khi dữ liệu lớn.
+- **CI/PostgreSQL khi phát hành:** thêm bài test riêng chạy trên PostgreSQL thực với hai yêu cầu cùng mã, cùng thao tác trả nợ và thử chi vượt số dư đồng thời; GitHub Actions dùng PostgreSQL service độc lập với bộ test SQLite trên cả workflow CI và Release; tag chỉ được phát hành khi bài test PostgreSQL đạt. Không tự thay đổi cấu hình PostgreSQL đang vận hành.
+**Chạy thử, build, phát hành v1.0.27:**
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\run.ps1
+.\scripts\publish.ps1 -Version 1.0.27
+```
+
+- **Giới hạn:** idempotency bảo vệ khi client gửi cùng mã; hai yêu cầu với mã khác nhau được coi là hai giao dịch khác nhau. Chưa có cơ chế đảo tất cả loại bút toán tự động; thao tác sửa/xóa hiện có vẫn bị chặn nếu không thể hoàn tác phân bổ nợ/quỹ an toàn. Để không chặn thay đổi hợp lệ, mã cũ không tự hết hạn trong phiên bản này.
 
 ## v1.0.26 — Gợi ý danh mục và phân tích thói quen chi tiêu (mới)
 

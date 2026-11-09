@@ -205,7 +205,9 @@ class Entry(Base):
     note: Mapped[str] = mapped_column(String(500), default='')
     occurred_on: Mapped[date] = mapped_column(Date, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    __table_args__ = (CheckConstraint('amount > 0'),)
+    # Never reuse deleted entry IDs on SQLite (PostgreSQL uses sequences).
+    # Revision history intentionally retains the old entry ID after deletion.
+    __table_args__ = (CheckConstraint('amount > 0'), {'sqlite_autoincrement': True})
 
 
 class Receipt(Base):
@@ -349,6 +351,30 @@ class PasswordResetToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FinancialOperation(Base):
+    """Per-user idempotency receipts, committed with the original money mutation."""
+    __tablename__ = 'financial_operations'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    key_hash: Mapped[str] = mapped_column(String(64))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    result_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint('user_id', 'key_hash', name='uq_financial_operation_user_key'),)
+
+
+class TransactionRevision(Base):
+    """Append-only business history; entry ID intentionally has no FK (survives delete)."""
+    __tablename__ = 'transaction_revisions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    entry_id: Mapped[int] = mapped_column(Integer, index=True)
+    operation: Mapped[str] = mapped_column(String(12))
+    before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class Audit(Base):
@@ -551,6 +577,57 @@ def user_json(u):
             'role':u.role,'active':u.active,'totp_enabled':bool(u.totp_secret),'opening_balance':u.opening_balance,
             'created_at':u.created_at.isoformat()}
 
+
+
+def financial_request(db: Session, user_id: int, request: Request, payload: dict):
+    """Validate and replay a POST/PUT/DELETE with the same client request ID.
+
+    IMPORTANT: call after account_locked, and save the receipt BEFORE the same
+    db.commit() as the money mutation. PostgreSQL serializes on the user row.
+    A different payload or endpoint cannot reuse a key silently.
+    """
+    key = request.headers.get('x-idempotency-key', '')
+    if not key:
+        return None, None
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', key):
+        raise HTTPException(422, 'Mã chống gửi trùng không hợp lệ (16-128 ký tự).')
+    key_hash = hashlib.sha256(key.encode('ascii')).hexdigest()
+    canonical = json.dumps({'method':request.method, 'route':request.url.path, 'data':payload},
+                           ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    fingerprint = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+    previous = db.scalar(select(FinancialOperation).where(
+        FinancialOperation.user_id == user_id, FinancialOperation.key_hash == key_hash))
+    if previous:
+        if not hmac.compare_digest(previous.fingerprint, fingerprint):
+            raise HTTPException(409, 'Mã yêu cầu đã được dùng cho thao tác khác.')
+        return None, json.loads(previous.result_json)
+    return (key_hash, fingerprint), None
+
+
+def save_financial_result(db: Session, user_id: int, operation, result: dict) -> None:
+    """Store success in the SAME transaction as the associated financial entries."""
+    if operation is not None:
+        key_hash, fingerprint = operation
+        db.add(FinancialOperation(user_id=user_id, key_hash=key_hash,
+                                  fingerprint=fingerprint, result_json=json.dumps(result, ensure_ascii=False)))
+        db.flush()  # uniqueness violation rolls the full mutation back
+
+
+def entry_snapshot(db: Session, e: Entry) -> dict:
+    debt = db.scalar(select(func.coalesce(func.sum(DebtPayment.amount),0)).where(
+        DebtPayment.user_id==e.user_id, DebtPayment.entry_id==e.id)) or 0
+    auto_stash = db.scalar(select(func.coalesce(func.sum(StashMovement.amount),0)).where(
+        StashMovement.user_id==e.user_id, StashMovement.source_entry_id==e.id)) or 0
+    return {'title':e.title, 'kind':e.kind, 'amount':int(e.amount), 'wallet_id':e.wallet_id,
+            'category_id':e.category_id, 'note':e.note, 'occurred_on':e.occurred_on.isoformat(),
+            'allocated_debt_principal':int(debt), 'allocated_stash':int(auto_stash)}
+
+
+def save_entry_revision(db: Session, e: Entry, action: str,
+                        before: dict | None, after: dict | None) -> None:
+    db.add(TransactionRevision(user_id=e.user_id, entry_id=e.id, operation=action,
+                               before_json=json.dumps(before, ensure_ascii=False) if before else None,
+                               after_json=json.dumps(after, ensure_ascii=False) if after else None))
 
 
 def account_locked(db,user_id):
@@ -1728,12 +1805,14 @@ def delete_debt(debt_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
 
 
 @app.post('/api/debts/{debt_id}/payments')
-def pay_debt_manual(debt_id:int,data:ManualDebtPayment,u:User=Depends(current),db:Session=Depends(get_db)):
+def pay_debt_manual(debt_id:int,data:ManualDebtPayment,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     amount=check_amount(data.amount)
     interest=check_amount(data.interest_amount,zero=True)
     if amount+interest>MAX_AMOUNT:raise HTTPException(422,'Tổng tiền vượt hạn mức.')
     if data.paid_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày thanh toán không hợp lệ.')
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,data.model_dump(mode='json'))
+    if cached is not None:return cached
     debt=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
     if not debt:raise HTTPException(404,'Không tìm thấy khoản nợ.')
     if amount>debt.remaining:raise HTTPException(409,'Số tiền gốc vượt quá số dư nợ còn lại.')
@@ -1744,8 +1823,9 @@ def pay_debt_manual(debt_id:int,data:ManualDebtPayment,u:User=Depends(current),d
     db.add(DebtPayment(user_id=u.id,debt_id=debt.id,wallet_id=wallet.id,amount=amount,
                        interest_amount=interest,mode='manual',paid_on=data.paid_on))
     db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'debt_manual_payment',f'#{debt.id}: principal={amount}, interest={interest}');db.commit()
-    return {'ok':True,'remaining':debt.remaining}
+    log(db,u.id,'debt_manual_payment',f'#{debt.id}: principal={amount}, interest={interest}')
+    result={'ok':True,'remaining':debt.remaining}
+    save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
 @app.delete('/api/debt-payments/{payment_id}')
@@ -1842,11 +1922,13 @@ def delete_savings_goal(goal_id: int, u: User = Depends(current), db: Session = 
 
 
 @app.post('/api/savings/{goal_id}/movements')
-def move_savings(goal_id: int,data: NewSavingsMovement,u: User = Depends(current),db: Session = Depends(get_db)):
+def move_savings(goal_id: int,data: NewSavingsMovement,request:Request,u: User = Depends(current),db: Session = Depends(get_db)):
     amount=check_amount(data.amount)
     if data.occurred_on > date.today() + timedelta(days=366):
         raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,data.model_dump(mode='json'))
+    if cached is not None:return cached
     goal=savings_goal_for(db,u.id,goal_id,True)
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     saved=savings_goal_balance(db,goal.id,u.id)
@@ -1861,8 +1943,8 @@ def move_savings(goal_id: int,data: NewSavingsMovement,u: User = Depends(current
                          kind=data.kind,amount=amount,occurred_on=data.occurred_on,note=data.note.strip())
     db.add(move);db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'savings_'+data.kind,f'#{goal.id} wallet:{wallet.id} {amount}')
-    db.commit()
-    return {'ok':True,'movement_id':move.id,'saved_amount':savings_goal_balance(db,goal.id,u.id)}
+    result={'ok':True,'movement_id':move.id,'saved_amount':savings_goal_balance(db,goal.id,u.id)}
+    save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
 def stash_fund_for(db: Session, user_id: int, fund_id: int, lock: bool = False) -> StashFund:
@@ -1950,12 +2032,14 @@ def delete_stash(fund_id:int,u:User=Depends(current),db:Session=Depends(get_db))
 
 
 @app.post('/api/stashes/{fund_id}/movements')
-def move_stash(fund_id:int,data:NewStashMovement,u:User=Depends(current),db:Session=Depends(get_db)):
+def move_stash(fund_id:int,data:NewStashMovement,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     amount=check_amount(data.amount)
     if data.occurred_on > date.today() + timedelta(days=366):
         raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
     # Serialize every wallet mutation for this user; keeps balance checks atomic on PostgreSQL.
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,data.model_dump(mode='json'))
+    if cached is not None:return cached
     fund=stash_fund_for(db,u.id,fund_id,True)
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     saved=stash_fund_balance(db,fund.id,u.id)
@@ -1968,8 +2052,8 @@ def move_stash(fund_id:int,data:NewStashMovement,u:User=Depends(current),db:Sess
                             amount=amount,occurred_on=data.occurred_on,note=data.note.strip())
     db.add(movement);db.flush();ensure_nonnegative(db,u.id)
     log(db,u.id,'stash_'+data.kind,f'#{fund.id} wallet:{wallet.id} {amount}')
-    db.commit()
-    return {'ok':True,'movement_id':movement.id,'saved_amount':stash_fund_balance(db,fund.id,u.id)}
+    result={'ok':True,'movement_id':movement.id,'saved_amount':stash_fund_balance(db,fund.id,u.id)}
+    save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
 @app.get('/api/wallets')
@@ -2022,19 +2106,22 @@ def toggle_wallet(wallet_id:int,u:User=Depends(current),db:Session=Depends(get_d
 
 
 @app.post('/api/wallet-transfers')
-def create_wallet_transfer(data:TransferWallet,u:User=Depends(current),db:Session=Depends(get_db)):
+def create_wallet_transfer(data:TransferWallet,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     amount=check_amount(data.amount)
     if data.from_wallet_id==data.to_wallet_id:raise HTTPException(422,'Ví gửi và ví nhận phải khác nhau.')
     if data.occurred_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,data.model_dump(mode='json'))
+    if cached is not None:return cached
     src=wallet_for(db,u.id,data.from_wallet_id,require_active=True)
     dst=wallet_for(db,u.id,data.to_wallet_id,require_active=True)
     if wallet_balance(db,src)<amount:raise HTTPException(409,'Ví gửi không đủ tiền.')
     t=WalletTransfer(user_id=u.id,from_wallet_id=src.id,to_wallet_id=dst.id,
                      amount=amount,occurred_on=data.occurred_on,note=data.note.strip())
     db.add(t);db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'wallet_transfer',f'#{t.id}: {src.id}->{dst.id} {amount}');db.commit()
-    return {'ok':True,'id':t.id}
+    log(db,u.id,'wallet_transfer',f'#{t.id}: {src.id}->{dst.id} {amount}')
+    result={'ok':True,'id':t.id}
+    save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
 @app.delete('/api/wallet-transfers/{transfer_id}')
@@ -2103,6 +2190,7 @@ def post_recurring_once(db: Session, rule: RecurringRule, due: date, skip=False)
         auto_paid=allocate_income_to_debts(db,rule.user_id,e)
         auto_saved=allocate_income_to_stashes(db,rule.user_id,e,auto_paid)
         ensure_nonnegative(db,rule.user_id)
+        save_entry_revision(db,e,'create',None,entry_snapshot(db,e))
         entry_id=e.id
     db.add(RecurringRun(user_id=rule.user_id,rule_id=rule.id,due_on=due,
                         entry_id=entry_id,status='skipped' if skip else 'posted'))
@@ -2543,29 +2631,51 @@ def escape_like(q):
     return q.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
 
 
+@app.get('/api/transactions/revisions')
+def transaction_revisions(entry_id: int | None = None, limit: int = 80,
+                          u: User = Depends(current), db: Session = Depends(get_db)):
+    if not 1 <= limit <= 200 or (entry_id is not None and entry_id < 1):
+        raise HTTPException(422, 'Giới hạn hoặc mã giao dịch không hợp lệ.')
+    query = select(TransactionRevision).where(TransactionRevision.user_id == u.id)
+    if entry_id is not None:
+        query = query.where(TransactionRevision.entry_id == entry_id)
+    rows = list(db.scalars(query.order_by(TransactionRevision.id.desc()).limit(limit)))
+    return {'items':[{'id':r.id,'entry_id':r.entry_id,'operation':r.operation,
+                      'before':json.loads(r.before_json) if r.before_json else None,
+                      'after':json.loads(r.after_json) if r.after_json else None,
+                      'created_at':r.created_at.isoformat()} for r in rows]}
+
+
 @app.post('/api/transactions')
-def add_entry(data:NewEntry,u:User=Depends(current),db:Session=Depends(get_db)):
+def add_entry(data:NewEntry,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     amount=check_amount(data.amount)
     if not data.title.strip():raise HTTPException(422,'Nội dung không được rỗng.')
     if data.occurred_on>date.today()+timedelta(days=366):raise HTTPException(422,'Ngày giao dịch không hợp lệ.')
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,data.model_dump(mode='json'))
+    if cached is not None:return cached
     category_for(db,u,data.category_id,data.kind,True)
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     e=Entry(user_id=u.id,title=data.title.strip(),kind=data.kind,amount=amount,category_id=data.category_id,wallet_id=wallet.id,note=data.note.strip(),occurred_on=data.occurred_on)
     db.add(e);db.flush();auto_paid=allocate_income_to_debts(db,u.id,e)
     auto_saved=allocate_income_to_stashes(db,u.id,e,auto_paid)
     ensure_nonnegative(db,u.id)
+    save_entry_revision(db,e,'create',None,entry_snapshot(db,e))
     log(db,u.id,'entry_added',f'{e.kind} #{e.id}: {e.amount}; debt_paid={auto_paid}; auto_saved={auto_saved}')
-    db.commit();return {'id':e.id,'ok':True,'debt_paid':auto_paid,'auto_saved':auto_saved}
+    result={'id':e.id,'ok':True,'debt_paid':auto_paid,'auto_saved':auto_saved}
+    save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
 @app.put('/api/transactions/{entry_id}')
-def edit_entry(entry_id:int,data:NewEntry,u:User=Depends(current),db:Session=Depends(get_db)):
+def edit_entry(entry_id:int,data:NewEntry,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     check_amount(data.amount)
     if not data.title.strip():raise HTTPException(422,'Nội dung không được rỗng.')
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,data.model_dump(mode='json'))
+    if cached is not None:return cached
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
+    before=entry_snapshot(db,e)
     category_for(db,u,data.category_id,data.kind)
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     reverse_entry_stash_allocations(db,u.id,e.id)
@@ -2575,15 +2685,20 @@ def edit_entry(entry_id:int,data:NewEntry,u:User=Depends(current),db:Session=Dep
     db.flush();auto_paid=allocate_income_to_debts(db,u.id,e)
     auto_saved=allocate_income_to_stashes(db,u.id,e,auto_paid)
     ensure_nonnegative(db,u.id)
+    save_entry_revision(db,e,'update',before,entry_snapshot(db,e))
     log(db,u.id,'entry_edited',f'#{e.id}; debt_paid={auto_paid}; auto_saved={auto_saved}')
-    db.commit();return {'ok':True,'debt_paid':auto_paid,'auto_saved':auto_saved}
+    result={'ok':True,'debt_paid':auto_paid,'auto_saved':auto_saved}
+    save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
 @app.delete('/api/transactions/{entry_id}')
-def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+def delete_entry(entry_id:int,request:Request,u:User=Depends(current),db:Session=Depends(get_db)):
     account_locked(db,u.id)
+    operation, cached=financial_request(db,u.id,request,{'entry_id':entry_id})
+    if cached is not None:return cached
     e=db.scalar(select(Entry).where(Entry.id==entry_id,Entry.user_id==u.id))
     if not e:raise HTTPException(404,'Không tìm thấy giao dịch.')
+    before=entry_snapshot(db,e)
     reverse_entry_stash_allocations(db,u.id,e.id)
     reverse_entry_payments(db,u.id,e.id)
     for run in db.scalars(select(RecurringRun).where(RecurringRun.user_id==u.id,RecurringRun.entry_id==e.id)):
@@ -2592,7 +2707,10 @@ def delete_entry(entry_id:int,u:User=Depends(current),db:Session=Depends(get_db)
         Receipt.user_id == u.id, Receipt.entry_id == e.id)).all()]
     db.query(Receipt).filter(Receipt.user_id == u.id, Receipt.entry_id == e.id).delete(synchronize_session=False)
     db.flush();db.delete(e);db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'entry_deleted',f'#{entry_id}');db.commit()
+    save_entry_revision(db,e,'delete',before,None)
+    log(db,u.id,'entry_deleted',f'#{entry_id}')
+    result={'ok':True}
+    save_financial_result(db,u.id,operation,result);db.commit()
     for path in receipt_files:
         path.unlink(missing_ok=True)
     return {'ok':True}
@@ -3105,6 +3223,8 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
         select(Receipt).where(Receipt.user_id == target.id)).all()]
     db.query(Receipt).filter(Receipt.user_id==target.id).delete(synchronize_session=False)
     db.query(Entry).filter(Entry.user_id==target.id).delete(synchronize_session=False)
+    db.query(TransactionRevision).filter(TransactionRevision.user_id==target.id).delete(synchronize_session=False)
+    db.query(FinancialOperation).filter(FinancialOperation.user_id==target.id).delete(synchronize_session=False)
     db.query(WalletReconciliation).filter(WalletReconciliation.user_id==target.id).delete(synchronize_session=False)
     db.query(WalletTransfer).filter(WalletTransfer.user_id==target.id).delete(synchronize_session=False)
     db.query(SavingsMovement).filter(SavingsMovement.user_id==target.id).delete(synchronize_session=False)

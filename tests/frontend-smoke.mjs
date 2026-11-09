@@ -58,6 +58,7 @@ const responses = {
   'savings': {items: [{id:1,name:'Quỹ dự phòng',target_amount:200000,saved_amount:25000,remaining_amount:175000,progress_pct:12.5,complete:false,due_date:null,note:'Tích lũy',created_at:'2026-11-01'}],total_saved:25000,total_targets:200000,history:[]},
   'dashboard': {...dashboard, budget_alerts:[{category_id:1,category:'Ăn uống',color:'#6475ff',amount:1000,spent:950,status:'critical',at_risk:true,projected_over:500}]},
   'transactions': { items: [entry], total: 1, page: 1, pages: 1 },
+  'transactions/revisions': {items:[{id:1,entry_id:7,operation:'update',created_at:'2026-11-08T12:00:00',before:{title:'Ăn trưa',kind:'expense',amount:20000,occurred_on:'2026-11-02',wallet_id:1,allocated_debt_principal:0,allocated_stash:0},after:{title:'Ăn trưa',kind:'expense',amount:25000,occurred_on:'2026-11-02',wallet_id:1,allocated_debt_principal:0,allocated_stash:0}}]},
   'reconciliation': {as_of:'2026-11-04T10:00:00Z', summary:{wallet_count:1,book_total:100000,checked_wallets:1,latest_discrepancies:0,integrity_issues:0,anomaly_candidates:1},ledger_total:100000, integrity_issues:[],sample_limited:false,
     wallets:[{id:1,name:'Ví chính',kind:'cash',active:true,book_balance:100000,last_check:{id:2,wallet_id:1,recorded_balance:100000,counted_balance:100000,difference:0,note:'Kiem tra',created_at:'2026-11-04T09:00:00Z'}}],
     anomalies:[{type:'duplicate_candidate',title:'Giao dịch có dấu hiệu trùng',description:'Hai giao dịch cùng ngày',entry_title:'Ăn trưa',occurred_on:'2026-11-02',entry_ids:[7,8],amount:25000,wallet_id:1}],
@@ -99,7 +100,7 @@ assert.ok(visited.includes('categories') && visited.includes('wallets'), 'Lookup
 
 const pages = [
   ['insights','Thói quen chi tiêu'], ['annual', 'Thống kê tài chính năm'], ['dashboard', 'Xin chào'], ['forecast','Dự báo dòng tiền'], ['savings', 'Mục tiêu tiết kiệm'], ['stashes', 'Tiền tích để dành'], ['reports', 'Báo cáo &amp; phân tích tài chính'], ['recurring', 'Giao dịch định kỳ'], ['wallets', 'Ví &amp; tài khoản'],
-  ['transactions', 'Quản lý giao dịch'], ['receipts', 'Hóa đơn &amp; chứng từ'], ['reconciliation', 'Đối soát &amp; kiểm tra tài chính'], ['budgets', 'Ngân sách thông minh'],
+  ['transactions', 'Quản lý giao dịch'], ['history', 'Lịch sử chỉnh sửa giao dịch'], ['receipts', 'Hóa đơn &amp; chứng từ'], ['reconciliation', 'Đối soát &amp; kiểm tra tài chính'], ['budgets', 'Ngân sách thông minh'],
   ['debts', 'Quản lý nợ chuyên sâu'], ['categories', 'Danh mục thu'],
   ['settings', 'Cài đặt tài khoản'], ['users', 'Quản lý người dùng'],
   ['audit', 'Nhật ký hoạt động'],
@@ -116,6 +117,10 @@ for (const [page, expected] of pages) {
 assert.equal(visited.filter(x => x === 'categories').length, pages.length + 1);
 assert.equal(visited.filter(x => x === 'wallets').length >= pages.length + 1, true);
 console.log(`Frontend smoke PASS: bootstrap + ${pages.length} pages (mocked API, no database).`);
+await runInContext('navigate("history")', context);
+assert.match(element('#page-content').innerHTML, /Đã sửa|Sửa/);
+assert.match(element('#page-content').innerHTML, /25\.000/);
+console.log('Transaction revision screen smoke PASS: before and after amounts.');
 // Recurring form and reminder badge are essential new surfaces in v1.0.14.
 await runInContext('navigate("recurring")', context);
 assert.match(element('#page-content').innerHTML, /Tạo lịch định kỳ/);

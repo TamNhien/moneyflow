@@ -8,6 +8,21 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # The tagged release is blocked unless the real PostgreSQL safety test passes.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: moneyflow_test
+          POSTGRES_USER: moneyflow_test
+          POSTGRES_PASSWORD: ci-only-moneyflow-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U moneyflow_test -d moneyflow_test"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+    env:
+      DATABASE_URL_POSTGRES_TEST: postgresql+psycopg://moneyflow_test:ci-only-moneyflow-test@127.0.0.1:5432/moneyflow_test
     steps:
       - uses: actions/checkout@v4
       - name: Check tag and VERSION consistency
@@ -41,6 +56,12 @@ jobs:
         run: docker build -f Dockerfile.test -t moneyflow-test:release .
       - name: Test backend (isolated, offline)
         run: docker run --rm --network none moneyflow-test:release
+      - name: Block release on PostgreSQL financial safety failure
+        run: >-
+          docker run --rm --network host
+          -e DATABASE_URL_POSTGRES_TEST
+          moneyflow-test:release
+          python -m pytest -q tests/test_financial_safety.py -k postgresql
       - name: Build application image
         run: docker build -t moneyflow-app:${{ github.ref_name }} .
   publish-release:

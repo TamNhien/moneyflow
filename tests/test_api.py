@@ -1494,11 +1494,11 @@ def test_pwa_static_is_public_only(client):
     assert client.get('/frontend/pwa.js').status_code==404
     home=client.get('/').text
     assert 'rel="manifest"' in home
-    assert '/pwa.js?v=1.0.26' in home
-    assert '/app.js?v=1.0.26' in home
+    assert '/pwa.js?v=1.0.27' in home
+    assert '/app.js?v=1.0.27' in home
 
 
-# v1.0.26: personalized suggestions & insights are owner-scoped, read-only heuristics.
+# v1.0.27: personalized suggestions & insights are owner-scoped, read-only heuristics.
 def test_v126_suggestions_and_spending_privacy(client):
     from backend.app import (SessionLocal, User, Wallet, Category, Entry,
                              seed_categories, ph, add_months_clamped)
