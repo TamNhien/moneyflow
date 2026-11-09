@@ -24,7 +24,7 @@ jobs:
     env:
       DATABASE_URL_POSTGRES_TEST: postgresql+psycopg://moneyflow_test:ci-only-moneyflow-test@127.0.0.1:5432/moneyflow_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check tag and VERSION consistency
         shell: bash
         run: |
@@ -70,7 +70,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pack safe source ZIP and SHA-256
         shell: pwsh
         run: ./scripts/package.ps1 -Version '${{ github.ref_name }}'
