@@ -115,6 +115,24 @@ def main():
         with SessionLocal() as db:
             assert db.scalar(select(func.count()).select_from(FinancialOperation))==8
 
+        # v1.0.29: reverse an automatic income debt payment on real PostgreSQL too.
+        debts=expect(client.get('/api/debts'))
+        auto=next(p for p in debts['payments'] if p['mode']=='auto' and p['entry_id']==credited['id'])
+        before_cash=client.get('/api/wallets').json()['total_balance']
+        before_stash=client.get('/api/stashes').json()['total_saved']
+        reversal=expect(req('DELETE',f'/api/debt-payments/{auto["id"]}'))
+        assert reversal['source_income_kept'] is True
+        assert reversal['restored_principal']==700 and reversal['new_remaining']==700
+        assert reversal['wallet_delta']==700
+        assert client.get('/api/wallets').json()['total_balance']==before_cash+700
+        assert client.get('/api/stashes').json()['total_saved']==before_stash
+        assert expect(client.get('/api/debts'))['total_remaining']==700
+        assert req('DELETE',f'/api/debt-payments/{auto["id"]}').status_code==404
+        assert len([r for r in client.get('/api/debts').json()['reversals']
+                    if r['original_payment_id']==auto['id']])==1
+        # This income still exists and must not be credited again on reversal.
+        assert any(x['id']==credited['id'] for x in client.get('/api/transactions?month='+date.today().strftime('%Y-%m')).json()['items'])
+
         # The second user cannot read the first user's edit history.
         expect(req('POST','/api/users',{
             'username':'other','email':'other@example.com','phone':'0987654321',

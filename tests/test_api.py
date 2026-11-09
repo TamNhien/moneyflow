@@ -1500,8 +1500,8 @@ def test_pwa_static_is_public_only(client):
     assert client.get('/frontend/pwa.js').status_code==404
     home=client.get('/').text
     assert 'rel="manifest"' in home
-    assert '/pwa.js?v=1.0.28' in home
-    assert '/app.js?v=1.0.28' in home
+    assert '/pwa.js?v=1.0.29' in home
+    assert '/app.js?v=1.0.29' in home
 
 
 # v1.0.27: personalized suggestions & insights are owner-scoped, read-only heuristics.
@@ -1602,7 +1602,7 @@ def test_v126_normalization_confidence_recurring_and_alert_logic():
 
 
 def test_v128_optional_income_debt_percent_interest_and_wallet_removal(client):
-    """v1.0.28: opt-in debt, manual interest in %, safe empty-wallet deletion."""
+    """v1.0.29: opt-in debt, manual interest in %, safe empty-wallet deletion."""
     admin_login=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
     assert admin_login.status_code==200
     username='v128'+uuid4().hex[:10]
@@ -1693,3 +1693,110 @@ def test_v128_stash_keeps_wallet_minimum(client):
     assert client.get('/api/wallets').json()['total_balance']==100000
     assert client.get('/api/stashes').json()['total_saved']==250000
     assert client.get('/api/dashboard?month=2026-11').json()['total_assets']==350000
+
+
+def test_v129_undo_auto_debt_payment_restores_principal_and_cash(client):
+    """Deleting auto payment restores principal/cash but NOT original income.
+
+    Mirrors a 3,020,582 VND auto payment against a debt with 20m remaining.
+    """
+    owner = auth_post(client, '/api/login', {'username':'owner','password':'SecurePassword@12345'})
+    assert owner.status_code == 200
+    name='v129'+uuid4().hex[:10]
+    assert auth_post(client,'/api/users',credentials(name),csrf=owner.json()['csrf_token']).status_code==200
+    login=auth_post(client,'/api/login',{'username':name,'password':'SecurePassword@12345'})
+    csrf=login.json()['csrf_token']
+    assert client.get('/api/me').json()['user']['auto_repay_debts'] is False
+    wallet=client.get('/api/wallets').json()['items'][0]['id']
+    inc=next(x['id'] for x in client.get('/api/categories').json() if x['kind']=='income')
+    exp=next(x['id'] for x in client.get('/api/categories').json() if x['kind']=='expense')
+    loan=auth_post(client,'/api/debts',{'name':'Mua feliz 2025','principal':23020582},csrf=csrf)
+    assert loan.status_code==200,loan.text
+    loan_id=loan.json()['id']
+    assert auth_post(client,'/api/settings/auto-debt',{'enabled':True},csrf=csrf,method='put').status_code==200
+    income={'title':'Lương tháng','kind':'income','amount':3020582,'wallet_id':wallet,
+            'category_id':inc,'occurred_on':'2026-10-23'}
+    r=auth_post(client,'/api/transactions',income,csrf=csrf)
+    assert r.status_code==200 and r.json()['debt_paid']==3020582,r.text
+    income_id=r.json()['id']
+    debts=client.get('/api/debts').json()
+    assert debts['total_remaining']==20000000 and debts['total_paid']==3020582
+    assert client.get('/api/wallets').json()['total_balance']==0
+    payment=next(p for p in debts['payments'] if p['entry_id']==income_id)
+    assert payment['mode']=='auto' and payment['amount']==3020582
+    # Another authenticated account may not reverse this owner's payment.
+    owner_again=auth_post(client,'/api/login',{'username':'owner','password':'SecurePassword@12345'})
+    denied=auth_post(client,f'/api/debt-payments/{payment["id"]}',csrf=owner_again.json()['csrf_token'],method='delete')
+    assert denied.status_code==404
+    login=auth_post(client,'/api/login',{'username':name,'password':'SecurePassword@12345'})
+    csrf=login.json()['csrf_token']
+    response=auth_post(client,f'/api/debt-payments/{payment["id"]}',csrf=csrf,method='delete')
+    assert response.status_code==200,response.text
+    outcome=response.json()
+    assert outcome['source_income_kept'] is True
+    assert outcome['restored_principal']==3020582
+    assert outcome['new_remaining']==23020582
+    assert outcome['wallet_delta']==3020582 and outcome['wallet_balance']==3020582
+    assert client.get('/api/debts').json()['total_paid']==0
+    assert client.get('/api/wallets').json()['total_balance']==3020582
+    ledger=client.get('/api/debts').json()
+    assert not any(p['id']==payment['id'] for p in ledger['payments'])
+    assert len([p for p in ledger['reversals'] if p['original_payment_id']==payment['id']])==1
+    assert next(p for p in ledger['reversals'] if p['original_payment_id']==payment['id'])['entry_id']==income_id
+    transactions=client.get('/api/transactions?month=2026-10').json()['items']
+    assert any(e['id']==income_id and e['kind']=='income' and e['amount']==3020582 for e in transactions)
+    assert client.get('/api/dashboard?month=2026-10').json()['month_income']==3020582
+    # A double-click/retry without a payment cannot refund any more cash.
+    assert auth_post(client,f'/api/debt-payments/{payment["id"]}',csrf=csrf,method='delete').status_code==404
+    assert client.get('/api/wallets').json()['total_balance']==3020582
+    # Manual interest is also reversed from the wallet, but only principal restores debt.
+    manual=auth_post(client,f'/api/debts/{loan_id}/payments',
+       {'amount':1000000,'interest_rate_pct':10,'wallet_id':wallet,'paid_on':'2026-11-09'},csrf=csrf)
+    assert manual.status_code==200,manual.text
+    assert client.get('/api/wallets').json()['total_balance']==1920582
+    mp=next(p for p in client.get('/api/debts').json()['payments'] if p['mode']=='manual' and p['debt_id']==loan_id)
+    assert mp['interest_amount']==100000
+    reversed_manual=auth_post(client,f'/api/debt-payments/{mp["id"]}',csrf=csrf,method='delete')
+    assert reversed_manual.status_code==200,reversed_manual.text
+    assert reversed_manual.json()['restored_principal']==1000000
+    assert reversed_manual.json()['reversed_interest']==100000
+    assert reversed_manual.json()['wallet_delta']==1100000
+    assert client.get('/api/debts').json()['total_interest_paid']==0
+    assert client.get('/api/wallets').json()['total_balance']==3020582
+    # Receivable undo must not make a wallet negative or create an audit reversal.
+    owed=auth_post(client,'/api/debts',{'name':'Tiền cho vay','direction':'receivable','principal':100000},csrf=csrf)
+    assert owed.status_code==200
+    rid=owed.json()['id']
+    got=auth_post(client,f'/api/debts/{rid}/payments',
+       {'amount':100000,'interest_rate_pct':0,'wallet_id':wallet,'paid_on':'2026-11-09'},csrf=csrf)
+    assert got.status_code==200,got.text
+    recv_p=next(p for p in client.get('/api/debts').json()['payments'] if p['debt_id']==rid)
+    paid_out=auth_post(client,'/api/transactions',
+       {'title':'Đã sử dụng tiền','kind':'expense','amount':3020582,'wallet_id':wallet,
+        'category_id':exp,'occurred_on':'2026-11-09'},csrf=csrf)
+    assert paid_out.status_code==200,paid_out.text
+    assert client.get('/api/wallets').json()['total_balance']==100000
+    assert auth_post(client,f'/api/debt-payments/{recv_p["id"]}',csrf=csrf,method='delete').status_code==200
+    # Recreate and spend all cash so that undo cannot remove the collected 100k.
+    got=auth_post(client,f'/api/debts/{rid}/payments',
+       {'amount':100000,'interest_rate_pct':0,'wallet_id':wallet,'paid_on':'2026-11-09'},csrf=csrf)
+    assert got.status_code==200,got.text
+    current=next(p for p in client.get('/api/debts').json()['payments'] if p['debt_id']==rid)
+    spent=auth_post(client,'/api/transactions',
+       {'title':'Chi tiêu sau thu hồi','kind':'expense','amount':100000,'wallet_id':wallet,
+        'category_id':exp,'occurred_on':'2026-11-09'},csrf=csrf)
+    assert spent.status_code==200,spent.text
+    assert client.get('/api/wallets').json()['total_balance']==0
+    num_reversals=len(client.get('/api/debts').json()['reversals'])
+    cannot=auth_post(client,f'/api/debt-payments/{current["id"]}',csrf=csrf,method='delete')
+    assert cannot.status_code==409,cannot.text
+    assert client.get('/api/debts').json()['total_receivable_remaining']==0
+    assert len(client.get('/api/debts').json()['reversals'])==num_reversals
+    assert auth_post(client,f'/api/transactions/{spent.json()["id"]}',csrf=csrf,method='delete').status_code==200
+    assert auth_post(client,f'/api/debt-payments/{current["id"]}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/debts').json()['total_receivable_remaining']==100000
+    # Original income remains deletable after its auto payment was manually reversed.
+    assert auth_post(client,f'/api/transactions/{paid_out.json()["id"]}',csrf=csrf,method='delete').status_code==200
+    assert auth_post(client,f'/api/transactions/{income_id}',csrf=csrf,method='delete').status_code==200
+    assert client.get('/api/debts').json()['total_remaining']==23020582
+    assert client.get('/api/wallets').json()['total_balance']==0

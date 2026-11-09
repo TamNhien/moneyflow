@@ -46,7 +46,10 @@ const dashboard = {
 };
 const debtData = { items: [], payments: [{id: 2, paid_on: '2026-11-02',
   debt: 'Nợ gốc', direction: 'payable', wallet_id: 1, mode: 'manual',
-  amount: 10000, interest_amount: 0}], total_remaining: 0, total_paid: 10000,
+  amount: 10000, interest_amount: 0}, {id: 3,paid_on:'2026-10-23',
+  debt:'Mua feliz 2025',direction:'payable',wallet_id:1,mode:'auto',
+  entry_id:5,amount:3020582,interest_amount:0}],
+  reversals:[{id:1,original_payment_id:11,debt:'Nợ thử',wallet_id:1,entry_id:7,mode:'manual',direction:'payable',amount:20000,interest_amount:0,paid_on:'2026-10-22',reversed_at:'2026-11-09T10:00:00'}], total_remaining: 0, total_paid: 10000,
   total_receivable_remaining: 0, total_receivable_collected: 0,
   total_interest_paid: 0, total_interest_received: 0 };
 const visited = [];
@@ -250,3 +253,13 @@ await runInContext('navigate("wallets")',context);
 assert.match(element('#page-content').innerHTML,/data-action="wallet-delete" data-id="9"/);
 assert.doesNotMatch(element('#page-content').innerHTML,/data-action="wallet-delete" data-id="1"/);
 console.log('v1.0.28 UI smoke PASS: comma formatting, repay toggle, interest percent, wallet deletion, reserve floor.');
+
+// v1.0.29: automatic repayments must expose the same undo action as manual ones.
+await runInContext('navigate("debts")',context);
+const debtMarkup=element('#page-content').innerHTML;
+assert.match(debtMarkup,/data-action="undo-debt-payment" data-id="2"/);
+assert.match(debtMarkup,/data-action="undo-debt-payment" data-id="3"/);
+assert.match(debtMarkup,/Xóa \/ Hoàn nợ gốc/);
+assert.match(debtMarkup,/Lịch sử hoàn tác khoản trả nợ/);
+assert.doesNotMatch(debtMarkup,/Sửa giao dịch thu để điều chỉnh/);
+console.log('v1.0.29 debt reversal smoke PASS: undo manual/automatic payment, audit history.');

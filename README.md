@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.28
+# MoneyFlow Local v1.0.29
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, **gợi ý danh mục từ lịch sử và phân tích thói quen chi tiêu**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -66,6 +66,26 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.29 — Xóa khoản trả nợ tự động và hoàn nguyên gốc (mới)
+
+- **Quản lý nợ → Lịch sử thanh toán / thu hồi → Xóa / Hoàn nợ gốc:** cho phép hoàn tác từng khoản thanh toán **cả tự động từ thu nhập lẫn thủ công**. Trước khi xóa, popup xác nhận hiển thị khoản nợ, số gốc phục hồi, lãi đảo, ví liên quan và tác động tới ví. Không phải xóa khoản nợ, cũng không phải xóa thu nhập gốc.
+- **Hạch toán chính xác:** khi hoàn tác một khoản trả nợ phải trả, `debts.remaining` tăng đúng **gốc** đã trả; dòng tiền trả nợ (gốc + lãi nếu có) được bỏ khỏi sổ, nên số dư ví nguồn tăng đúng số tiền đã trừ. Với khoản **thu hồi nợ phải thu**, hoàn tác sẽ giảm tiền ví và tăng số nợ phải thu; không cho phép âm ví. Không xóa/gộp lại thu nhập gốc, không chạy quy tắc tự trả nợ hoặc tự tích một lần nữa.
+- **Hủy chính xác một lần:** lần xóa lại payment cũ trả 404, không hoàn tiền lần hai. PostgreSQL dùng khóa `User` và `DebtPayment` để tuần tự hóa thay đổi. Nếu không đủ tiền khi hoàn tác thu hồi nợ hoặc sai lệch dữ liệu gốc, giao dịch được rollback.
+- **Lịch sử hoàn tác độc lập:** bảng mới `debt_payment_reversals` lưu bản ghi bất biến (gốc, lãi, nguồn thu, ví, khoản nợ, ngày trả, ngày hoàn tác). API `GET /api/debts` trả thêm trường `reversals`; trang Quản lý nợ hiển thị lịch sử hoàn tác để đối soát. Audit log vẫn ghi hành động. Các tổng thu/chi, số dư ví, báo cáo nợ tiếp tục dựa trên **các thanh toán còn hiệu lực**.
+- **Tương thích dữ liệu cũ:** migration chỉ bổ sung bảng mới, không tự thay đổi các khoản đã trả của v1.0.28 hoặc cũ hơn. Riêng khi người dùng bấm Hoàn tác mới tác động số dư. Thao tác sửa thu nhập trong tương lai khi đang bật tự trả nợ vẫn có thể áp dụng lại quy tắc theo dữ liệu mới; hãy tắt quy tắc nếu muốn mọi thu nhập sau đó không tự trả nợ.
+- **Kiểm thử:** API tự trả nợ đã tồn tại, xóa khoản tự động, trả lại gốc và ví, giữ thu nhập, chống xóa hai lần, phần hoàn tác thủ công, thu hồi nợ phải thu, phân quyền và bảo toàn dữ liệu khi lỗi.
+
+**Lệnh chạy / phát hành:**
+
+```powershell
+cd D:\LienThongDH\DoAn\moneyflow
+Get-ChildItem .\scripts -Recurse -Filter *.ps1 | Unblock-File
+.\scripts\run.ps1
+.\scripts\publish.ps1 -Version 1.0.29
+```
+
+---
 
 ## v1.0.28 — Xóa ví an toàn, định dạng VNĐ, lãi suất %, trả nợ tự chọn và quỹ để dành (mới)
 

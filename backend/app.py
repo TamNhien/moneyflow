@@ -259,6 +259,29 @@ class DebtPayment(Base):
     __table_args__ = (CheckConstraint('amount > 0'), CheckConstraint("mode IN ('auto','manual')"),)
 
 
+class DebtPaymentReversal(Base):
+    """Append-only audit: a reversed payment disappears from active debt math.
+
+    Original payment ID is deliberately not a FK: the active row is deleted.
+    Debt, wallet and entry identifiers remain as historical references.
+    """
+    __tablename__ = 'debt_payment_reversals'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    original_payment_id: Mapped[int] = mapped_column(Integer, index=True)
+    debt_id: Mapped[int] = mapped_column(Integer)
+    debt_name: Mapped[str] = mapped_column(String(120))
+    wallet_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    principal_amount: Mapped[int] = mapped_column(BigInteger)
+    interest_amount: Mapped[int] = mapped_column(BigInteger, default=0)
+    mode: Mapped[str] = mapped_column(String(10))
+    direction: Mapped[str] = mapped_column(String(12))
+    paid_on: Mapped[date] = mapped_column(Date)
+    reversed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (CheckConstraint('principal_amount > 0'), CheckConstraint('interest_amount >= 0'),)
+
+
 class Budget(Base):
     __tablename__ = 'budgets'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -1751,7 +1774,15 @@ def list_debts(u:User=Depends(current),db:Session=Depends(get_db)):
     directions={debt.id:debt.direction for debt in debts}
     payables=[d for d in debts if d.direction=='payable']
     receivables=[d for d in debts if d.direction=='receivable']
+    reversals=list(db.scalars(select(DebtPaymentReversal).where(
+        DebtPaymentReversal.user_id==u.id).order_by(DebtPaymentReversal.id.desc()).limit(60)))
     return {'items':[debt_dict(d) for d in debts],
+            'reversals':[{'id':r.id,'original_payment_id':r.original_payment_id,
+                          'debt_id':r.debt_id,'debt':r.debt_name,'wallet_id':r.wallet_id,
+                          'entry_id':r.entry_id,'amount':r.principal_amount,
+                          'interest_amount':r.interest_amount,'mode':r.mode,
+                          'direction':r.direction,'paid_on':r.paid_on.isoformat(),
+                          'reversed_at':r.reversed_at.isoformat()} for r in reversals],
             'total_principal':sum(d.principal for d in payables),
             'total_remaining':sum(d.remaining for d in payables),
             'total_paid':sum(d.principal-d.remaining for d in payables),
@@ -1860,15 +1891,61 @@ def pay_debt_manual(debt_id:int,data:ManualDebtPayment,request:Request,u:User=De
 
 
 @app.delete('/api/debt-payments/{payment_id}')
-def undo_manual_payment(payment_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
-    account_locked(db,u.id)
-    p=db.scalar(select(DebtPayment).where(DebtPayment.user_id==u.id,DebtPayment.id==payment_id).with_for_update())
-    if not p:raise HTTPException(404,'Không tìm thấy thanh toán.')
-    if p.mode!='manual':raise HTTPException(409,'Thanh toán tự động chỉ có thể điều chỉnh bằng giao dịch thu nguồn.')
+def undo_debt_payment(payment_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
+    """Reverse one manual OR income-generated payment atomically.
+
+    Debt principal is reinstated, its full cash movement (principal + interest)
+    disappears from the originating wallet, while the original income entry
+    remains untouched. No automatic reallocation runs during this reversal.
+    """
+    account_locked(db,u.id)  # serializes financial mutations for the same user on PostgreSQL
+    p=db.scalar(select(DebtPayment).where(
+        DebtPayment.user_id==u.id,DebtPayment.id==payment_id).with_for_update())
+    if not p:
+        raise HTTPException(404,'Thanh toán không còn tồn tại hoặc đã được hoàn tác.')
     d=db.scalar(select(Debt).where(Debt.id==p.debt_id,Debt.user_id==u.id).with_for_update())
-    d.remaining+=p.amount;db.delete(p)
-    db.flush();ensure_nonnegative(db,u.id)
-    log(db,u.id,'debt_payment_undone',f'#{payment_id}');db.commit();return {'ok':True}
+    if not d:
+        raise HTTPException(409,'Không tìm thấy khoản nợ gốc để hoàn tác.')
+    amount=int(p.amount)
+    interest=int(p.interest_amount or 0)
+    if amount<=0 or interest<0 or int(d.remaining)+amount>int(d.principal):
+        raise HTTPException(409,'Dữ liệu gốc nợ không hợp lệ; chưa thể hoàn tác an toàn.')
+    if p.mode=='auto' and (d.direction!='payable' or p.entry_id is None):
+        raise HTTPException(409,'Khoản trả nợ tự động không có liên kết thu nhập hợp lệ.')
+    if p.mode not in ('manual','auto'):
+        raise HTTPException(409,'Hình thức trả nợ không được hỗ trợ.')
+    wallet=db.scalar(select(Wallet).where(Wallet.user_id==u.id,Wallet.id==p.wallet_id))
+    if not wallet:
+        raise HTTPException(409,'Không tìm thấy ví liên kết với thanh toán.')
+    before_balance=wallet_balance(db,wallet)
+    mode=p.mode
+    entry_id=p.entry_id
+    direction=d.direction
+    # An immutable audit row is committed with the reversal. FK to active
+    # payment is intentionally omitted, so its original ID survives deletion.
+    reversal=DebtPaymentReversal(
+        user_id=u.id,original_payment_id=p.id,debt_id=d.id,debt_name=d.name,
+        wallet_id=wallet.id,entry_id=entry_id,principal_amount=amount,
+        interest_amount=interest,mode=mode,direction=direction,paid_on=p.paid_on)
+    db.add(reversal)
+    d.remaining+=amount
+    db.delete(p)
+    db.flush()
+    ensure_nonnegative(db,u.id)  # especially important when undoing a receivable collection
+    new_wallet_balance=wallet_balance(db,wallet)
+    delta=new_wallet_balance-before_balance
+    expected_delta=(amount+interest) * (1 if direction=='payable' else -1)
+    if delta!=expected_delta:
+        raise HTTPException(409,'Chênh lệch hoàn tác không đúng; giao dịch chưa được lưu.')
+    log(db,u.id,'debt_payment_reversed',
+        f'payment=#{payment_id}; debt=#{d.id}; principal={amount}; interest={interest}; '
+        f'wallet=#{wallet.id}; entry=#{entry_id}; mode={mode}')
+    result={'ok':True,'reversal_id':reversal.id,'restored_principal':amount,
+            'reversed_interest':interest,'new_remaining':int(d.remaining),
+            'wallet_delta':delta,'wallet_balance':new_wallet_balance,
+            'source_income_kept':mode=='auto'}
+    db.commit()
+    return result
 
 
 
@@ -3277,6 +3354,7 @@ def remove_user(user_id:int,data:DeleteUser,u:User=Depends(admin),db:Session=Dep
     db.query(RecurringRun).filter(RecurringRun.user_id==target.id).delete(synchronize_session=False)
     db.query(RecurringRule).filter(RecurringRule.user_id==target.id).delete(synchronize_session=False)
     db.query(Budget).filter(Budget.user_id==target.id).delete(synchronize_session=False)
+    db.query(DebtPaymentReversal).filter(DebtPaymentReversal.user_id==target.id).delete(synchronize_session=False)
     db.query(DebtPayment).filter(DebtPayment.user_id==target.id).delete(synchronize_session=False)
     db.query(Debt).filter(Debt.user_id==target.id).delete(synchronize_session=False)
     db.query(StashMovement).filter(StashMovement.user_id==target.id).delete(synchronize_session=False)
