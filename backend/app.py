@@ -260,10 +260,12 @@ class DebtPayment(Base):
 
 
 class DebtPaymentReversal(Base):
-    """Append-only audit: a reversed payment disappears from active debt math.
+    """Audited reversal: original payment disappears from active debt math.
 
     Original payment ID is deliberately not a FK: the active row is deleted.
     Debt, wallet and entry identifiers remain as historical references.
+    Cash adjustment is negative when a payable auto-payment was voided without
+    actual money being refunded; the offset preserves the booked wallet balance.
     """
     __tablename__ = 'debt_payment_reversals'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -279,6 +281,9 @@ class DebtPaymentReversal(Base):
     direction: Mapped[str] = mapped_column(String(12))
     paid_on: Mapped[date] = mapped_column(Date)
     reversed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    cash_handling: Mapped[str] = mapped_column(String(20), default='refund', server_default='refund')
+    cash_adjustment: Mapped[int] = mapped_column(BigInteger, default=0, server_default='0')
+    cash_corrected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__ = (CheckConstraint('principal_amount > 0'), CheckConstraint('interest_amount >= 0'),)
 
 
@@ -445,6 +450,9 @@ async def lifespan(_app: FastAPI):
             conn.execute(text('ALTER TABLE stash_funds ADD COLUMN IF NOT EXISTS auto_wallet_id INTEGER REFERENCES wallets(id)'))
             conn.execute(text('ALTER TABLE stash_movements ADD COLUMN IF NOT EXISTS source_entry_id INTEGER REFERENCES entries(id)'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_stash_auto_entry_fund ON stash_movements (fund_id, source_entry_id) WHERE source_entry_id IS NOT NULL'))
+            conn.execute(text("ALTER TABLE debt_payment_reversals ADD COLUMN IF NOT EXISTS cash_handling VARCHAR(20) NOT NULL DEFAULT 'refund'"))
+            conn.execute(text('ALTER TABLE debt_payment_reversals ADD COLUMN IF NOT EXISTS cash_adjustment BIGINT NOT NULL DEFAULT 0'))
+            conn.execute(text('ALTER TABLE debt_payment_reversals ADD COLUMN IF NOT EXISTS cash_corrected_at TIMESTAMPTZ'))
         else:
             columns = {row[1] for row in conn.execute(text('PRAGMA table_info(users)'))}
             for name, kind in [('email','VARCHAR(254)'),('phone','VARCHAR(20)'),('address','VARCHAR(300'),('auto_repay_debts','BOOLEAN NOT NULL DEFAULT 0'),('totp_secret','TEXT'),('totp_pending','TEXT'),('totp_pending_until','DATETIME'),('totp_last_step','INTEGER NOT NULL DEFAULT -1'),('totp_failed_attempts','INTEGER NOT NULL DEFAULT 0'),('totp_locked_until','DATETIME')]:
@@ -480,6 +488,12 @@ async def lifespan(_app: FastAPI):
                     if col not in existing:
                         conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {definition}'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_stash_auto_entry_fund ON stash_movements (fund_id, source_entry_id) WHERE source_entry_id IS NOT NULL'))
+            old_cols = {row[1] for row in conn.execute(text('PRAGMA table_info(debt_payment_reversals)'))}
+            for col, definition in [('cash_handling', "VARCHAR(20) NOT NULL DEFAULT 'refund'"),
+                                    ('cash_adjustment', 'BIGINT NOT NULL DEFAULT 0'),
+                                    ('cash_corrected_at', 'DATETIME')]:
+                if col not in old_cols:
+                    conn.execute(text(f'ALTER TABLE debt_payment_reversals ADD COLUMN {col} {definition}'))
     # Idempotent upgrade: create exactly one default wallet for each legacy account.
     # Existing opening_balance, entries and debt payments are reassigned, not copied.
     with SessionLocal.begin() as db:
@@ -679,8 +693,15 @@ def debt_cash_delta(db, user_id, wallet_id=None):
         Debt, Debt.id == DebtPayment.debt_id).where(DebtPayment.user_id == user_id)
     if wallet_id is not None:
         stmt = stmt.where(DebtPayment.wallet_id == wallet_id)
-    return sum((int(principal) + int(interest or 0)) * (1 if direction == 'receivable' else -1)
-               for principal, interest, direction in db.execute(stmt))
+    payment_cash=sum((int(principal) + int(interest or 0)) * (1 if direction == 'receivable' else -1)
+                     for principal, interest, direction in db.execute(stmt))
+    # A principal-only correction must not credit the wallet when an auto
+    # payment is voided. Historical v1.0.29 reversals default to offset 0.
+    offset_stmt=select(func.coalesce(func.sum(DebtPaymentReversal.cash_adjustment),0)).where(
+        DebtPaymentReversal.user_id==user_id)
+    if wallet_id is not None:
+        offset_stmt=offset_stmt.where(DebtPaymentReversal.wallet_id==wallet_id)
+    return payment_cash + int(db.scalar(offset_stmt) or 0)
 
 
 def add_months_clamped(value: date, months: int) -> date:
@@ -890,6 +911,22 @@ def reverse_entry_stash_allocations(db: Session, user_id: int, entry_id: int) ->
         db.delete(m)
         db.flush()
     return sum(m.amount for m in movements)
+
+
+def release_voided_income_adjustments(db: Session, user_id: int, entry_id: int) -> None:
+    """Drop principal-only wallet offsets when their SOURCE income is edited/deleted.
+
+    The income adjustment and source entry change share one DB transaction, so
+    no isolated credit is exposed and a failed edit cannot leave a partial state.
+    """
+    rows=list(db.scalars(select(DebtPaymentReversal).where(
+        DebtPaymentReversal.user_id==user_id, DebtPaymentReversal.entry_id==entry_id,
+        DebtPaymentReversal.cash_handling=='principal_only').with_for_update()))
+    for r in rows:
+        r.cash_handling='released_with_income'
+        r.cash_adjustment=0
+        r.cash_corrected_at=utcnow()
+    db.flush()
 
 
 def reverse_entry_payments(db, user_id, entry_id):
@@ -1468,6 +1505,19 @@ def _security_integrity_for_user(db:Session,u:User):
     for eid,wid,wuid in linked:
         if wid is None or wuid!=u.id:
             checks.append({'kind':'invalid_wallet_link','detail':f'Giao dịch #{eid} không liên kết đúng ví.'})
+    # New reversal accounting must balance explicitly with the historic cash movement.
+    for r in db.scalars(select(DebtPaymentReversal).where(DebtPaymentReversal.user_id==u.id)):
+        expected=-(int(r.principal_amount)+int(r.interest_amount or 0))
+        state=r.cash_handling
+        valid=((state=='principal_only' and r.mode=='auto' and r.direction=='payable'
+                and int(r.cash_adjustment)==expected)
+               or (state in ('refund','released_with_income') and int(r.cash_adjustment)==0))
+        if not valid:
+            checks.append({'kind':'invalid_debt_reversal_cash',
+                           'detail':f'Khoản hoàn tác #{r.id} có chế độ tiền ví không nhất quán.'})
+        if not db.scalar(select(Wallet.id).where(Wallet.id==r.wallet_id,Wallet.user_id==u.id)):
+            checks.append({'kind':'invalid_debt_reversal_wallet',
+                           'detail':f'Khoản hoàn tác #{r.id} liên kết ví không hợp lệ.'})
     return {'ok':not checks,'checked_wallets':len(wallets),'checked_entries':len(linked),'issues':checks[:100]}
 
 
@@ -1782,7 +1832,9 @@ def list_debts(u:User=Depends(current),db:Session=Depends(get_db)):
                           'entry_id':r.entry_id,'amount':r.principal_amount,
                           'interest_amount':r.interest_amount,'mode':r.mode,
                           'direction':r.direction,'paid_on':r.paid_on.isoformat(),
-                          'reversed_at':r.reversed_at.isoformat()} for r in reversals],
+                          'reversed_at':r.reversed_at.isoformat(),
+                          'cash_handling':r.cash_handling,'cash_adjustment':int(r.cash_adjustment or 0),
+                          'cash_corrected_at':r.cash_corrected_at.isoformat() if r.cash_corrected_at else None} for r in reversals],
             'total_principal':sum(d.principal for d in payables),
             'total_remaining':sum(d.remaining for d in payables),
             'total_paid':sum(d.principal-d.remaining for d in payables),
@@ -1856,8 +1908,10 @@ def delete_debt(debt_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
     account_locked(db,u.id)
     d=db.scalar(select(Debt).where(Debt.user_id==u.id,Debt.id==debt_id).with_for_update())
     if not d:raise HTTPException(404,'Không tìm thấy khoản nợ.')
-    if db.scalar(select(func.count()).select_from(DebtPayment).where(DebtPayment.debt_id==d.id)):
-        raise HTTPException(409,'Khoản nợ đã có lịch sử thanh toán. Không thể xóa để bảo toàn sổ sách.')
+    if (db.scalar(select(func.count()).select_from(DebtPayment).where(DebtPayment.debt_id==d.id))
+            or db.scalar(select(func.count()).select_from(DebtPaymentReversal).where(
+                DebtPaymentReversal.user_id==u.id,DebtPaymentReversal.debt_id==d.id))):
+        raise HTTPException(409,'Khoản nợ có lịch sử thanh toán/hoàn tác. Không thể xóa để bảo toàn sổ sách.')
     db.delete(d);log(db,u.id,'debt_deleted',f'#{debt_id}');db.commit();return {'ok':True}
 
 
@@ -1890,15 +1944,21 @@ def pay_debt_manual(debt_id:int,data:ManualDebtPayment,request:Request,u:User=De
     save_financial_result(db,u.id,operation,result);db.commit();return result
 
 
-@app.delete('/api/debt-payments/{payment_id}')
-def undo_debt_payment(payment_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
-    """Reverse one manual OR income-generated payment atomically.
+class DebtPaymentUndoChoice(BaseModel):
+    cash_handling: Literal['principal_only', 'refund'] | None = None
 
-    Debt principal is reinstated, its full cash movement (principal + interest)
-    disappears from the originating wallet, while the original income entry
-    remains untouched. No automatic reallocation runs during this reversal.
+
+@app.delete('/api/debt-payments/{payment_id}')
+def undo_debt_payment(payment_id:int,data:DebtPaymentUndoChoice | None = None,
+                      u:User=Depends(current),db:Session=Depends(get_db)):
+    """Reinstate principal, with an EXPLICIT cash policy.
+
+    Auto repayments default to principal_only (do not credit the wallet).
+    Manual repayments default to refund (restore the actually paid money).
+    The principal-only wallet offset stays in the audit ledger rather than
+    posting a fabricated expense or changing the starting balance.
     """
-    account_locked(db,u.id)  # serializes financial mutations for the same user on PostgreSQL
+    account_locked(db,u.id)
     p=db.scalar(select(DebtPayment).where(
         DebtPayment.user_id==u.id,DebtPayment.id==payment_id).with_for_update())
     if not p:
@@ -1914,38 +1974,85 @@ def undo_debt_payment(payment_id:int,u:User=Depends(current),db:Session=Depends(
         raise HTTPException(409,'Khoản trả nợ tự động không có liên kết thu nhập hợp lệ.')
     if p.mode not in ('manual','auto'):
         raise HTTPException(409,'Hình thức trả nợ không được hỗ trợ.')
+    policy=(data.cash_handling if data and data.cash_handling else
+            ('principal_only' if p.mode=='auto' else 'refund'))
+    if policy=='principal_only' and (p.mode!='auto' or d.direction!='payable'):
+        raise HTTPException(422,'Chỉ được giữ nguyên số dư ví khi hoàn tác khoản trả nợ tự động từ thu nhập.')
     wallet=db.scalar(select(Wallet).where(Wallet.user_id==u.id,Wallet.id==p.wallet_id))
     if not wallet:
         raise HTTPException(409,'Không tìm thấy ví liên kết với thanh toán.')
+    if p.mode=='auto' and not db.scalar(select(Entry.id).where(
+        Entry.id==p.entry_id,Entry.user_id==u.id,Entry.kind=='income')):
+        raise HTTPException(409,'Không tìm thấy thu nhập liên quan để đối soát an toàn.')
     before_balance=wallet_balance(db,wallet)
-    mode=p.mode
     entry_id=p.entry_id
+    mode=p.mode
     direction=d.direction
-    # An immutable audit row is committed with the reversal. FK to active
-    # payment is intentionally omitted, so its original ID survives deletion.
+    adjustment=-(amount+interest) if policy=='principal_only' else 0
     reversal=DebtPaymentReversal(
         user_id=u.id,original_payment_id=p.id,debt_id=d.id,debt_name=d.name,
         wallet_id=wallet.id,entry_id=entry_id,principal_amount=amount,
-        interest_amount=interest,mode=mode,direction=direction,paid_on=p.paid_on)
+        interest_amount=interest,mode=mode,direction=direction,paid_on=p.paid_on,
+        cash_handling=policy,cash_adjustment=adjustment)
     db.add(reversal)
     d.remaining+=amount
     db.delete(p)
     db.flush()
-    ensure_nonnegative(db,u.id)  # especially important when undoing a receivable collection
+    ensure_nonnegative(db,u.id)
     new_wallet_balance=wallet_balance(db,wallet)
     delta=new_wallet_balance-before_balance
-    expected_delta=(amount+interest) * (1 if direction=='payable' else -1)
+    expected_delta=(amount+interest) * (1 if direction=='payable' else -1) + adjustment
     if delta!=expected_delta:
         raise HTTPException(409,'Chênh lệch hoàn tác không đúng; giao dịch chưa được lưu.')
     log(db,u.id,'debt_payment_reversed',
         f'payment=#{payment_id}; debt=#{d.id}; principal={amount}; interest={interest}; '
-        f'wallet=#{wallet.id}; entry=#{entry_id}; mode={mode}')
+        f'wallet=#{wallet.id}; entry=#{entry_id}; mode={mode}; cash_handling={policy}; offset={adjustment}')
     result={'ok':True,'reversal_id':reversal.id,'restored_principal':amount,
             'reversed_interest':interest,'new_remaining':int(d.remaining),
-            'wallet_delta':delta,'wallet_balance':new_wallet_balance,
+            'cash_handling':policy,'wallet_delta':delta,'wallet_balance':new_wallet_balance,
             'source_income_kept':mode=='auto'}
     db.commit()
     return result
+
+
+@app.post('/api/debt-reversals/{reversal_id}/cancel-wallet-refund')
+def cancel_existing_reversal_wallet_refund(reversal_id:int,u:User=Depends(current),
+                                           db:Session=Depends(get_db)):
+    """One-time correction of an OLD auto reversal that erroneously credited cash.
+
+    Does NOT touch Debt.remaining. Credit was previously posted by deleting
+    the payment; the offset removes ONLY that excess credit from the wallet.
+    """
+    account_locked(db,u.id)
+    r=db.scalar(select(DebtPaymentReversal).where(
+        DebtPaymentReversal.id==reversal_id,
+        DebtPaymentReversal.user_id==u.id).with_for_update())
+    if r is None:
+        raise HTTPException(404,'Không tìm thấy khoản hoàn tác thuộc tài khoản này.')
+    if (r.mode!='auto' or r.direction!='payable' or r.entry_id is None
+            or r.cash_handling!='refund' or int(r.cash_adjustment or 0)!=0):
+        raise HTTPException(409,'Khoản này không phải hoàn tác tự động còn tiền hoàn ví để điều chỉnh.')
+    if not db.scalar(select(Entry.id).where(
+        Entry.id==r.entry_id,Entry.user_id==u.id,Entry.kind=='income')):
+        raise HTTPException(409,'Thu nhập nguồn không còn tồn tại; cần kiểm tra sổ trước khi điều chỉnh.')
+    wallet=db.scalar(select(Wallet).where(Wallet.id==r.wallet_id,Wallet.user_id==u.id))
+    if wallet is None:
+        raise HTTPException(409,'Ví hoàn tác không còn tồn tại.')
+    original_balance=wallet_balance(db,wallet)
+    amount=int(r.principal_amount)+int(r.interest_amount or 0)
+    r.cash_handling='principal_only'
+    r.cash_adjustment=-amount
+    r.cash_corrected_at=utcnow()
+    db.flush()
+    ensure_nonnegative(db,u.id)  # no negative cash even if excess was already spent
+    updated=wallet_balance(db,wallet)
+    if updated-original_balance!=-amount:
+        raise HTTPException(409,'Điều chỉnh số dư không khớp; đã hủy thao tác.')
+    log(db,u.id,'debt_reversal_cash_corrected',
+        f'reversal=#{r.id}; principal={r.principal_amount}; offset={-amount}; wallet=#{wallet.id}')
+    db.commit()
+    return {'ok':True,'reversal_id':r.id,'debt_principal_unchanged':True,
+            'cash_handling':'principal_only','wallet_delta':-amount,'wallet_balance':updated}
 
 
 
@@ -2229,6 +2336,7 @@ def delete_wallet(wallet_id:int,u:User=Depends(current),db:Session=Depends(get_d
         raise HTTPException(409,'Chỉ xóa ví có số dư hiện tại và số dư ban đầu bằng 0. Hãy chuyển tiền về ví khác trước.')
     # Deleting a wallet with references would invalidate audit/financial history.
     checks=((Entry,Entry.wallet_id),(DebtPayment,DebtPayment.wallet_id),
+            (DebtPaymentReversal,DebtPaymentReversal.wallet_id),
             (WalletTransfer,WalletTransfer.from_wallet_id),(WalletTransfer,WalletTransfer.to_wallet_id),
             (SavingsMovement,SavingsMovement.wallet_id),(StashMovement,StashMovement.wallet_id),
             (StashFund,StashFund.auto_wallet_id),(RecurringRule,RecurringRule.wallet_id),
@@ -2816,6 +2924,7 @@ def edit_entry(entry_id:int,data:NewEntry,request:Request,u:User=Depends(current
     wallet=wallet_for(db,u.id,data.wallet_id,require_active=True)
     reverse_entry_stash_allocations(db,u.id,e.id)
     reverse_entry_payments(db,u.id,e.id)
+    release_voided_income_adjustments(db,u.id,e.id)
     e.wallet_id=wallet.id
     e.title=data.title.strip();e.kind=data.kind;e.amount=data.amount;e.category_id=data.category_id;e.note=data.note.strip();e.occurred_on=data.occurred_on
     db.flush();auto_paid=allocate_income_to_debts(db,u.id,e)
@@ -2837,6 +2946,7 @@ def delete_entry(entry_id:int,request:Request,u:User=Depends(current),db:Session
     before=entry_snapshot(db,e)
     reverse_entry_stash_allocations(db,u.id,e.id)
     reverse_entry_payments(db,u.id,e.id)
+    release_voided_income_adjustments(db,u.id,e.id)
     for run in db.scalars(select(RecurringRun).where(RecurringRun.user_id==u.id,RecurringRun.entry_id==e.id)):
         run.entry_id=None;run.status='deleted'
     receipt_files = [receipt_path(r.storage_key) for r in db.scalars(select(Receipt).where(

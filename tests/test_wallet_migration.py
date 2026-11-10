@@ -130,3 +130,36 @@ with TestClient(app):
         assert con.execute('SELECT COUNT(*) FROM stash_movements').fetchone()[0]==1
         assert con.execute('SELECT COUNT(*) FROM stash_funds').fetchone()[0]==1
         assert con.execute("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='uq_stash_auto_entry_fund'").fetchone()[0]==1
+
+
+
+def test_v129_reversals_acquire_cash_policy_without_changing_refunds(tmp_path):
+    """Existing v1.0.29 refunds must NOT automatically turn into principal-only."""
+    db_file=tmp_path/'v129_reversals.sqlite'
+    con=sqlite3.connect(db_file)
+    con.executescript('''
+      CREATE TABLE debt_payment_reversals (
+        id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, original_payment_id INTEGER NOT NULL,
+        debt_id INTEGER NOT NULL, debt_name VARCHAR(120) NOT NULL,
+        wallet_id INTEGER, entry_id INTEGER, principal_amount BIGINT NOT NULL,
+        interest_amount BIGINT NOT NULL DEFAULT 0, mode VARCHAR(10) NOT NULL,
+        direction VARCHAR(12) NOT NULL, paid_on DATE NOT NULL, reversed_at DATETIME);
+      INSERT INTO debt_payment_reversals VALUES
+        (77,10,88,99,'Mua feliz',1,100,3020582,0,'auto','payable','2026-10-23','2026-11-09');
+    ''')
+    con.commit();con.close()
+    root=Path(__file__).resolve().parents[1]
+    env={**os.environ,'DATABASE_URL':'sqlite:///'+str(db_file),'PYTHONPATH':str(root)}
+    code='''from fastapi.testclient import TestClient
+from backend.app import app, SessionLocal, DebtPaymentReversal
+with TestClient(app):
+ with SessionLocal() as db:
+  item=db.get(DebtPaymentReversal,77)
+  assert item.principal_amount==3020582
+  assert item.cash_handling=='refund' and item.cash_adjustment==0
+  assert item.cash_corrected_at is None
+'''
+    for _ in range(2):
+        proc=subprocess.run([sys.executable,'-c',code],cwd=root,env=env,
+                            capture_output=True,text=True,timeout=30)
+        assert proc.returncode==0,proc.stdout+'\n'+proc.stderr

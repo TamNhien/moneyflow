@@ -1,4 +1,4 @@
-# MoneyFlow Local v1.0.29
+# MoneyFlow Local v1.0.30
 
 Ứng dụng quản lý tài chính cá nhân chạy trên Windows, giao diện **dark mode**, hỗ trợ nhiều người dùng, phân quyền, thu chi, giao dịch định kỳ, nhắc lịch, **mục tiêu tiết kiệm, tiền tích để dành tự động theo % hoặc số tiền cố định**, ngân sách, **quản lý nợ phải trả/phải thu, lãi thực tế và lịch trả góp** **hóa đơn & chứng từ ảnh/PDF gắn với giao dịch**, **đối soát số dư theo ví và phát hiện giao dịch nghi vấn**, **gợi ý danh mục từ lịch sử và phân tích thói quen chi tiêu**, và báo cáo. Backend Python/FastAPI, frontend HTML/CSS/JavaScript, PostgreSQL 18 trong Docker. Tất cả tài liệu và lịch sử phiên bản được duy trì trong **README.md duy nhất**.
 
@@ -66,6 +66,15 @@ Caddy reverse proxy dùng `tls internal` và `default_sni 127.0.0.1`, cấp ch�
 ```
 
 Giữ nguyên các volume Docker và CA cũ. Không dùng `docker compose down -v`. Nếu HTTPS vẫn lỗi, kiểm tra nhật ký Caddy và thử cả hai địa chỉ HTTPS ở bảng trên.
+
+## v1.0.30 — Sửa hoàn nợ gốc không làm tăng tổng tiền
+
+- **Lỗi đã sửa:** v1.0.29 xóa bút toán trả nợ tự động làm mất khoản trừ tiền khỏi ví, nên khi phục hồi gốc thì số dư ví cũng tăng. V1.0.30 tách hai chế độ: **Chỉ hoàn nợ gốc (mặc định cho các khoản trả nợ tự động)** và **Hoàn gốc + hoàn ví (lựa chọn riêng khi thực sự có tiền được hoàn lại)**. Khoản trả nợ thủ công tiếp tục hoàn ví theo cách hạch toán thông thường.
+- **Sửa giao dịch cũ:** nếu đã dùng v1.0.29 hoàn tác và thấy tiền ví bị cộng dư, mở **Quản lý nợ → Lịch sử hoàn tác khoản trả nợ → Bỏ tiền đã cộng vào ví**. Hệ thống sẽ **trừ khoản đã cộng dư khỏi ví** mà **không cộng nợ gốc thêm lần hai**, chỉ cho phép thực hiện một lần; nếu ví không đủ tiền để trừ, ứng dụng từ chối và giữ nguyên dữ liệu.
+- **Hạch toán minh bạch:** chế độ không hoàn tiền tạo một khoản **điều chỉnh sổ tiền** âm gắn với lịch sử hoàn tác, KHÔNG tạo giao dịch chi tiêu giả, không điều chỉnh số dư đầu kỳ, không chuyển tiền ngân hàng. Số dư ví, tổng tiền khả dụng và dòng tiền tháng/năm đều tính bút toán điều chỉnh này để đối soát thống nhất. Thu nhập nguồn được giữ nguyên. Nếu sửa/xóa thu nhập nguồn, phần điều chỉnh liên quan được giải phóng trong cùng transaction, bảo toàn tính nguyên tử và kiểm tra ví không âm.
+- **Dữ liệu cũ:** các hoàn tác từ v1.0.29 mặc định vẫn là trạng thái **đã cộng ví** cho đến khi bạn chủ động bấm nút sửa. Không tự ý đổi dữ liệu tài chính trước đây. Thêm ba cột `cash_handling`, `cash_adjustment`, `cash_corrected_at` vào bảng `debt_payment_reversals` bằng migration PostgreSQL/SQLite an toàn, chạy lại không tạo dữ liệu trùng. Giữ lịch sử hoàn tác và ngăn xóa ví/nợ có liên kết lịch sử.
+- **API:** `DELETE /api/debt-payments/{id}` nhận JSON `{ "cash_handling": "principal_only" | "refund" }` (tùy chọn; mặc định theo nguồn gốc); `POST /api/debt-reversals/{id}/cancel-wallet-refund` chỉ điều chỉnh hoàn tác tự động cũ một lần, yêu cầu phiên đăng nhập/CSRF; cả hai chạy trong transaction có kiểm tra số dư.
+- **Kiểm thử:** API mới cho 3.020.582đ, hành vi cũ, chống thực hiện trùng, bảo vệ quyền sở hữu, xử lý thiếu tiền, sửa/xóa thu nhập nguồn và đối chiếu báo cáo năm; kiểm thử PostgreSQL chạy trong GitHub CI và Release.
 
 ## v1.0.29 — Xóa khoản trả nợ tự động và hoàn nguyên gốc (mới)
 
@@ -377,6 +386,8 @@ Hai nút ở trang **Báo cáo tài chính** được làm rõ bằng biểu tư
 
 | Phiên bản | Nội dung |
 |---|---|
+| **v1.0.30** | **Tách hoàn tác gốc và hoàn tiền ví; mặc định hoàn gốc không cộng ví cho khoản tự động; sửa bút toán v1.0.29 đã cộng ví dư mà không tăng nợ lần hai; đồng bộ báo cáo và giữ nguyên dữ liệu cũ.** |
+| v1.0.29 | Hoàn tác khoản trả nợ tự động, lưu lịch sử hoàn tác độc lập và khôi phục nợ gốc. |
 | **v1.0.28** | **Xóa ví phụ trống chưa có lịch sử, định dạng VNĐ có dấu phẩy, lãi thủ công theo % gốc từng lần thanh toán, tự trả nợ từ thu nhập mặc định tắt, giữ số dư ví tối thiểu cho quỹ tự tích và dự báo khớp quy tắc.** |
 | v1.0.0 | Quản lý thu/chi, số dư, danh mục, ngân sách, dashboard và tài khoản. |
 | v1.0.1 | PostgreSQL host 5435 và giao diện đăng nhập nền tối. |

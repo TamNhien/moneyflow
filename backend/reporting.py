@@ -33,13 +33,13 @@ def report_months(end: str, count: int):
 
 
 def build_report(db, user_id: int, end: str, count: int):
-    from backend.app import (Category, Entry, Debt, DebtPayment, Wallet, WalletTransfer,
+    from backend.app import (Category, Entry, Debt, DebtPayment, DebtPaymentReversal, Wallet, WalletTransfer,
                              wallet_balance, current_balance, total_reserved_savings, total_stash_funds)
     months, start, until = report_months(end, count)
     trend = {key: dict(month=key, income=0, expense=0,
                        payable_principal=0, payable_interest=0,
                        receivable_principal=0, receivable_interest=0,
-                       debt_paid=0, debt_collected=0, net_cash=0) for key in months}
+                       debt_paid=0, debt_collected=0, cash_adjustments=0, net_cash=0) for key in months}
     cats = {c.id: c for c in db.scalars(select(Category).where(Category.user_id == user_id))}
     wallets = list(db.scalars(select(Wallet).where(Wallet.user_id == user_id).order_by(Wallet.id)))
     wallet_names = {w.id: w.name for w in wallets}
@@ -61,12 +61,20 @@ def build_report(db, user_id: int, end: str, count: int):
         prefix = 'payable' if debt.direction == 'payable' else 'receivable'
         trend[key][prefix + '_principal'] += int(payment.amount)
         trend[key][prefix + '_interest'] += int(payment.interest_amount or 0)
+    # Booked principal-only corrections are real wallet offsets, NOT
+    # expense or repayment. They must appear separately in net cash.
+    for correction in db.scalars(select(DebtPaymentReversal).where(
+        DebtPaymentReversal.user_id==user_id,
+        DebtPaymentReversal.paid_on>=start,
+        DebtPaymentReversal.paid_on<until,
+        DebtPaymentReversal.cash_adjustment!=0)):
+        trend[correction.paid_on.strftime('%Y-%m')]['cash_adjustments'] += int(correction.cash_adjustment)
     for r in trend.values():
         r['debt_paid'] = r['payable_principal'] + r['payable_interest']
         r['debt_collected'] = r['receivable_principal'] + r['receivable_interest']
-        r['net_cash'] = r['income'] - r['expense'] - r['debt_paid'] + r['debt_collected']
+        r['net_cash'] = r['income'] - r['expense'] - r['debt_paid'] + r['debt_collected'] + r['cash_adjustments']
     total = {field: sum(r[field] for r in trend.values()) for field in
-             ('income','expense','debt_paid','debt_collected','net_cash',
+             ('income','expense','debt_paid','debt_collected','cash_adjustments','net_cash',
               'payable_principal','payable_interest','receivable_principal','receivable_interest')}
     selected, previous = trend[months[-1]], trend[months[-2]]
     comparison = {k: {'current': selected[k], 'previous': previous[k],
@@ -158,16 +166,17 @@ def excel_bytes(data):
         ('Khoảng báo cáo', f"{data['from_month']} → {data['to_month']}"),
         ('Tổng thu nhập',t['income']),('Chi tiêu',t['expense']),
         ('Trả nợ gốc + lãi',t['debt_paid']),('Thu hồi nợ gốc + lãi',t['debt_collected']),
+        ('Điều chỉnh sổ không hoàn về ví',t['cash_adjustments']),
         ('Dòng tiền thuần trong kỳ',t['net_cash']),
         ('Số dư khả dụng trong ví',s['cash_balance']),('Tiết kiệm dành riêng',s['savings_balance']),('Trong đó: Tiền tích để dành',s['stash_balance']),('Nợ phải thu hiện tại',s['receivable']),
         ('Nợ phải trả hiện tại',s['payable']),('Tài sản ròng hiện tại',s['net_worth']),
         ('Chuyển ví nội bộ (không tính vào dòng tiền)',data['transfer_amount'])],
         widths={1:49,2:34},money_cols=(2,))
     sheet('Theo tháng',['Tháng','Thu nhập','Chi tiêu','Trả gốc','Trả lãi',
-          'Thu hồi gốc','Thu hồi lãi','Dòng tiền thuần'],[
+          'Thu hồi gốc','Thu hồi lãi','Điều chỉnh sổ','Dòng tiền thuần'],[
           (r['month'],r['income'],r['expense'],r['payable_principal'],r['payable_interest'],
-           r['receivable_principal'],r['receivable_interest'],r['net_cash']) for r in data['monthly']],
-          widths={1:17,2:23,3:23,4:23,5:23,6:23,7:23,8:26},money_cols=(2,3,4,5,6,7,8))
+           r['receivable_principal'],r['receivable_interest'],r['cash_adjustments'],r['net_cash']) for r in data['monthly']],
+          widths={1:17,2:23,3:23,4:23,5:23,6:23,7:23,8:25,9:26},money_cols=(2,3,4,5,6,7,8,9))
     sheet('Danh mục chi',['Danh mục','Chi tháng chọn (VNĐ)'],
           [(r['name'],r['amount']) for r in data['categories']], widths={1:40,2:28},money_cols=(2,))
     sheet('Các ví',['Tên ví','Loại','Số dư hiện tại'],[
@@ -228,6 +237,7 @@ def pdf_bytes(data):
     story.append(table(['Chỉ tiêu','Giá trị'],[
         ('Tổng thu nhập',t['income']),('Chi tiêu',t['expense']),
         ('Trả nợ (gốc + lãi)',t['debt_paid']),('Thu hồi nợ (gốc + lãi)',t['debt_collected']),
+        ('Điều chỉnh ví không hoàn tiền',t['cash_adjustments']),
         ('Biến động tiền thuần trong kỳ',t['net_cash'])], [96*mm,78*mm],(1,)))
     story.append(Paragraph('Tình hình tài chính hiện tại',section))
     story.append(table(['Chỉ tiêu','Giá trị'],[
@@ -242,6 +252,7 @@ def pdf_bytes(data):
         chart.add(Rect(x+bar_width+2,base,bar_width,height*r['expense']/maximum,fillColor=green,strokeColor=None))
         chart.add(String(x,12,r['month'][5:]+'/'+r['month'][2:4],fontName='MFDejaVu',fontSize=6,fillColor=muted))
     story.extend([chart,Paragraph('Tím: thu nhập · Xanh: chi tiêu. Trả nợ được thống kê riêng, không tính trùng vào chi tiêu.',note)])
+    story.append(Paragraph('Các khoản chỉ hoàn nợ gốc mà không hoàn tiền ví được ghi thành điều chỉnh sổ, không phải chi tiêu hay thanh toán nợ.',note))
     story.append(Paragraph('Bảng biến động tiền theo tháng',section))
     story.append(table(['Tháng','Thu','Chi','Trả nợ','Thu hồi nợ','Tiền thuần'],[
         (r['month'],r['income'],r['expense'],r['debt_paid'],r['debt_collected'],r['net_cash']) for r in monthly],
@@ -261,7 +272,7 @@ def pdf_bytes(data):
 # estimates, not immutable audited snapshots.
 def annual_finances(db, user_id: int, year: int):
     from calendar import monthrange
-    from backend.app import (Entry, Debt, DebtPayment, Wallet, SavingsMovement,
+    from backend.app import (Entry, Debt, DebtPayment, DebtPaymentReversal, Wallet, SavingsMovement,
                              StashMovement)
     today = date.today()
     if year < 2000 or year > today.year:
@@ -272,6 +283,10 @@ def annual_finances(db, user_id: int, year: int):
     all_payments = list(db.execute(select(DebtPayment, Debt).join(Debt, DebtPayment.debt_id == Debt.id)
                   .where(DebtPayment.user_id == user_id, Debt.user_id == user_id,
                          DebtPayment.paid_on <= cutoff)))
+    all_corrections=list(db.scalars(select(DebtPaymentReversal).where(
+        DebtPaymentReversal.user_id==user_id,
+        DebtPaymentReversal.cash_adjustment!=0,
+        DebtPaymentReversal.paid_on<=cutoff)))
     all_savings = list(db.scalars(select(SavingsMovement).where(
         SavingsMovement.user_id == user_id, SavingsMovement.occurred_on <= cutoff)))
     all_stash = list(db.scalars(select(StashMovement).where(
@@ -325,6 +340,9 @@ def annual_finances(db, user_id: int, year: int):
             else:
                 debt_receivable_cash += cash
                 if payment.paid_on >= first and payment.paid_on.month == m: receivable_collected+=cash
+        cash_adjustments=sum(int(item.cash_adjustment) for item in all_corrections if item.paid_on<=last)
+        month_adjustments=sum(int(item.cash_adjustment) for item in all_corrections
+                              if item.paid_on>=first and item.paid_on.month==m)
         reserved_goals=sum((1 if move.kind=='deposit' else -1)*int(move.amount)
                            for move in all_savings if move.occurred_on<=last)
         reserved_stash=sum((1 if move.kind=='deposit' else -1)*int(move.amount)
@@ -334,7 +352,7 @@ def annual_finances(db, user_id: int, year: int):
         opening=sum(int(w.opening_balance) for w in wallets
                     if min(day_of(w),wallet_first_activity.get(w.id,day_of(w)))<=last)
         available=(opening + all_income - all_expense - debt_payable_cash
-                   + debt_receivable_cash - reserved_goals - reserved_stash)
+                   + debt_receivable_cash + cash_adjustments - reserved_goals - reserved_stash)
         payable=receivable=0
         for debt in debts:
             if day_of(debt)>last: continue
@@ -344,11 +362,12 @@ def annual_finances(db, user_id: int, year: int):
         saved=reserved_goals+reserved_stash
         monthly.append({'month':f'{year}-{m:02d}', 'income':income,'expense':expense,
                 'debt_paid':payable_paid,'debt_collected':receivable_collected,
-                'net_cash':income-expense-payable_paid+receivable_collected,
+                'cash_adjustments':month_adjustments,
+                'net_cash':income-expense-payable_paid+receivable_collected+month_adjustments,
                 'available':available,'reserved':saved,'assets':available+saved,
                 'payable':payable,'receivable':receivable,
                 'net_worth':available+saved+receivable-payable})
-    fields=('income','expense','debt_paid','debt_collected','net_cash')
+    fields=('income','expense','debt_paid','debt_collected','cash_adjustments','net_cash')
     totals={key:sum(int(x[key]) for x in monthly) for key in fields}
     # Previous year: compute only activity in that year. This avoids using previous
     # results as a fake past balance snapshot.
@@ -382,15 +401,16 @@ def annual_excel_bytes(data):
     ws.append(['Ngay chot',data['as_of']])
     for k,label in [('income','Tong thu nhap'),('expense','Tong chi tieu'),
                     ('debt_paid','Tra no'),('debt_collected','Thu hoi no'),
+                    ('cash_adjustments','Dieu chinh so du vi'),
                     ('net_cash','Dong tien thuan')]: ws.append([label,data['totals'][k]])
     ws.append(['Ghi chu',data['disclaimer']])
     ws.column_dimensions['A'].width=34;ws.column_dimensions['B'].width=105
     for cell in ws[1]: cell.font=Font(bold=True,color='FFFFFF');cell.fill=PatternFill('solid',fgColor='202A49')
     w=wb.create_sheet('Bien dong 12 thang');w.freeze_panes='B2'
-    w.append(['Thang','Thu nhap','Chi tieu','Tra no','Thu hoi no','Tien thuan',
+    w.append(['Thang','Thu nhap','Chi tieu','Tra no','Thu hoi no','Dieu chinh vi','Tien thuan',
               'So du kha dung (uoc tinh)','Tien danh rieng (uoc tinh)',
               'Tai san tien (uoc tinh)','No phai thu','No phai tra','Tai san rong (uoc tinh)'])
-    keys=['month','income','expense','debt_paid','debt_collected','net_cash',
+    keys=['month','income','expense','debt_paid','debt_collected','cash_adjustments','net_cash',
           'available','reserved','assets','receivable','payable','net_worth']
     for row in data['monthly']:w.append([row[k] for k in keys])
     w.auto_filter.ref=w.dimensions
@@ -437,12 +457,13 @@ def annual_pdf_bytes(data):
     def P(s):return Paragraph(str(s),style)
     def H(s):return Paragraph(str(s),head_style)
     story.append(tb([[H('Chỉ tiêu'),H('Giá trị')]]+[[P(label),P(currency(data['totals'][key]))] for key,label in
-          [('income','Thu nhập'),('expense','Chi tiêu'),('debt_paid','Trả nợ'),('debt_collected','Thu hồi nợ'),('net_cash','Dòng tiền thuần')]], [93*mm,89*mm],True))
+          [('income','Thu nhập'),('expense','Chi tiêu'),('debt_paid','Trả nợ'),('debt_collected','Thu hồi nợ'),('cash_adjustments','Điều chỉnh ví'),('net_cash','Dòng tiền thuần')]], [93*mm,89*mm],True))
     story.extend([Spacer(1,8*mm),P('TÀI SẢN RÒNG THEO THÁNG (ƯỚC TÍNH)'),Spacer(1,3*mm)])
     rows=[[H('Tháng'),H('Thu'),H('Chi'),H('Tiền thuần'),H('Tài sản ròng')]]
     for r in data['monthly']:
         rows.append([P(r['month']),P(currency(r['income'])),P(currency(r['expense'])),P(currency(r['net_cash'])),P(currency(r['net_worth']))])
     story.append(tb(rows,[23*mm,36*mm,36*mm,42*mm,45*mm],True))
-    story.extend([Spacer(1,6*mm),P('Lưu ý: Lịch sử được tái lập từ sổ giao dịch hiện có; không phải số dư đã khóa sổ.')])
+    story.extend([Spacer(1,6*mm),P('Khoản điều chỉnh không hoàn về ví được cộng vào tiền thuần nhưng không tính thành chi tiêu hay khoản trả nợ.'),
+                  P('Lưu ý: Lịch sử được tái lập từ sổ giao dịch hiện có; không phải số dư đã khóa sổ.')])
     doc.build(story)
     return out.getvalue()
