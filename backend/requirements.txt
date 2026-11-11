@@ -1,9 +1,9 @@
 # Direct runtime dependencies, pinned for deterministic app builds.
 # Dependabot checks for newer stable releases automatically on GitHub.
-fastapi==0.128.2
-uvicorn==0.48.0
-sqlalchemy==2.0.50
-psycopg[binary]==3.3.7
+fastapi==0.162.2
+uvicorn==0.54.0
+sqlalchemy==2.1.8
+psycopg[binary]==3.3.8
 argon2-cffi==25.1.0
 openpyxl==3.1.5
 reportlab==4.4.9
