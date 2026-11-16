@@ -62,7 +62,7 @@ jobs:
       DATABASE_URL_POSTGRES_TEST: postgresql+psycopg://moneyflow_test:ci-only-moneyflow-test@127.0.0.1:5432/moneyflow_test
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           cache: pip
